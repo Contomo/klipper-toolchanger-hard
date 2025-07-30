@@ -39,6 +39,8 @@ class Tool:
         detect_pin_name = config.get('detection_pin', None)
         self.detect_state = toolchanger.DETECT_UNAVAILABLE
         if detect_pin_name:
+            pin = detect_pin_name.replace('^', '').replace('!', '')
+            self.printer.lookup_object('pins').allow_multi_use_pin(pin)
             self.printer.load_object(config, 'buttons').register_buttons([detect_pin_name], self._handle_detect)
             self.detect_state = toolchanger.DETECT_ABSENT
         self.extruder_stepper_name = self._config_get(config, 'extruder_stepper', None)
