@@ -49,6 +49,10 @@ class Toolchanger:
         self.initialize_gcode = self.gcode_macro.load_template(
             config, 'initialize_gcode', '')
         self.error_gcode = self.gcode_macro.load_template(config, 'error_gcode') if config.get('error_gcode', None) else None
+        self.on_tool_mounted_gcode = self.gcode_macro.load_template(
+            config, 'on_tool_mounted_gcode', '')
+        self.on_tool_removed_gcode = self.gcode_macro.load_template(
+            config, 'on_tool_removed_gcode', '')
         self.default_before_change_gcode = self.gcode_macro.load_template(
             config, 'before_change_gcode', '')
         self.default_after_change_gcode = self.gcode_macro.load_template(
@@ -466,8 +470,16 @@ class Toolchanger:
         if len(detected_names) > 1:
             self.gcode.respond_info("Multiple tools detected: %s" % (detected_names,))
             detected = None
+        if detected != self.detected_tool and not self.status in [STATUS_CHANGING, STATUS_INITIALIZING]:
+            if detected and not self.detected_tool:
+                    self.run_gcode('on_tool_mounted_gcode', 
+                                    self.on_tool_mounted_gcode, {'tool': detected})
+            elif not detected and self.detected_tool:
+                if self.active_tool == self.detected_tool:
+                    self.run_gcode('on_tool_removed_gcode', 
+                                    self.on_tool_removed_gcode, {'tool': self.detected_tool})
         self.detected_tool = detected
-
+        
     def require_detected_tool(self, respond_info):
         if self.detected_tool is not None:
             return self.detected_tool
