@@ -478,7 +478,7 @@ class Toolchanger:
         if len(detected_names) > 1:
             self.gcode.respond_info("Multiple tools detected: %s" % (detected_names,))
             detected = None
-        if detected != self.detected_tool and not self.status in [STATUS_CHANGING, STATUS_INITIALIZING] and not self.printer.is_shutdown():# and self.is_printer_ready:
+        if detected != self.detected_tool and not self.status in [STATUS_CHANGING, STATUS_INITIALIZING] and not self.is_printer_ready:
             if detected and not self.detected_tool:
                 self.run_gcode('on_tool_mounted_gcode', 
                                detected.on_tool_mounted_gcode, {'tool': detected})
