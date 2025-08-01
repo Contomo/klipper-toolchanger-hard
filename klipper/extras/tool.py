@@ -25,6 +25,10 @@ class Tool:
             config, 'before_change_gcode', self._config_get(config, 'before_change_gcode', ''))
         self.after_change_gcode = self.gcode_macro.load_template(
             config, 'after_change_gcode', self._config_get(config, 'after_change_gcode', ''))
+        self.on_tool_mounted_gcode = self.gcode_macro.load_template(
+            config, 'on_tool_mounted_gcode', self._config_get(config, 'on_tool_mounted_gcode', ''))
+        self.on_tool_removed_gcode = self.gcode_macro.load_template(
+            config, 'on_tool_removed_gcode', self._config_get(config, 'on_tool_removed_gcode', ''))
         self.recover_gcode = self.gcode_macro.load_template(
             config, 'recover_gcode', self._config_get(config, 'recover_gcode', ''))
         self.gcode_x_offset = self._config_getfloat(
