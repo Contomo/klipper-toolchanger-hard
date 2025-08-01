@@ -36,13 +36,11 @@ class Tool:
         self.params = {**self.toolchanger.params, **toolchanger.get_params_dict(config)}
         self.original_params = {}
         self.extruder_name = self._config_get(config, 'extruder', None)
-        detect_pin_name = config.get('detection_pin', None)
-        self.detect_state = toolchanger.DETECT_UNAVAILABLE
-        if detect_pin_name:
-            pin = detect_pin_name.replace('^', '').replace('!', '')
-            self.printer.lookup_object('pins').allow_multi_use_pin(pin)
-            self.printer.load_object(config, 'buttons').register_buttons([detect_pin_name], self._handle_detect)
-            self.detect_state = toolchanger.DETECT_ABSENT
+        self.detect_pin_name = config.get('detection_pin', None)
+        self.detect_state    = toolchanger.DETECT_UNAVAILABLE
+        self.flip_detect_state = True
+        if self.detect_pin_name:
+            self._register_button(config)
         self.extruder_stepper_name = self._config_get(config, 'extruder_stepper', None)
         self.extruder = None
         self.extruder_stepper = None
@@ -74,9 +72,21 @@ class Tool:
             self.assign_tool(self.tool_number)
 
     def _handle_detect(self, eventtime, is_triggered):
-        self.detect_state = toolchanger.DETECT_PRESENT if is_triggered else toolchanger.DETECT_ABSENT
+        _state = self.flip_detect_state ^ is_triggered
+        self.detect_state = toolchanger.DETECT_PRESENT if _state else toolchanger.DETECT_ABSENT
         self.toolchanger.note_detect_change(self)
 
+    def _register_button(self, config):
+        ppins = self.printer.lookup_object('pins')
+        detect_param = ppins.parse_pin(self.detect_pin_name, can_invert=True, can_pullup=True)
+        base_name = f"{detect_param['chip_name']}:{detect_param['pin']}"
+        ppins.allow_multi_use_pin(base_name)
+        buttons = self.printer.load_object(config, 'buttons')
+        buttons.register_buttons([base_name], self._handle_detect)
+        _flip = ('!' in self.detect_pin_name) ^ bool(detect_param['invert'])
+        self.flip_detect_state = self.flip_detect_state ^ _flip
+        self.detect_state = toolchanger.DETECT_PRESENT if self.flip_detect_state else toolchanger.DETECT_ABSENT
+        
     def get_status(self, eventtime):
         return {**self.params,
                 'name': self.name,
