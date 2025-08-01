@@ -48,7 +48,8 @@ class Toolchanger:
                                                   home_options, 'abort')
         self.initialize_gcode = self.gcode_macro.load_template(
             config, 'initialize_gcode', '')
-        self.error_gcode = self.gcode_macro.load_template(config, 'error_gcode') if config.get('error_gcode', None) else None
+        self.error_gcode = self.gcode_macro.load_template(config, 'error_gcode') \
+            if config.get('error_gcode', None) else None
         self.on_tool_mounted_gcode = self.gcode_macro.load_template(
             config, 'on_tool_mounted_gcode', '')
         self.on_tool_removed_gcode = self.gcode_macro.load_template(
@@ -71,6 +72,7 @@ class Toolchanger:
         config.get('fan', None)
         config.get_prefix_options('params_')
 
+        self.is_printer_ready = False 
         self.status = STATUS_UNINITALIZED
         self.active_tool = None
         self.detected_tool = None
@@ -86,6 +88,8 @@ class Toolchanger:
                                             self._handle_home_rails_begin)
         self.printer.register_event_handler('klippy:connect',
                                             self._handle_connect)
+        self.printer.register_event_handler("klippy:ready", 
+                                            self._handle_ready)
         self.printer.register_event_handler("klippy:shutdown",
                                             self._handle_shutdown)
         self.gcode.register_command("INITIALIZE_TOOLCHANGER",
@@ -133,7 +137,11 @@ class Toolchanger:
     def _handle_shutdown(self):
         self.status = STATUS_UNINITALIZED
         self.active_tool = None
+        self.is_printer_ready = False  
 
+    def _handle_ready(self):
+        self.is_printer_ready = True
+        
     def get_status(self, eventtime):
         return {**self.params,
                 'name': self.name,
@@ -463,21 +471,20 @@ class Toolchanger:
     def note_detect_change(self, tool):
         detected = None
         detected_names = []
-        for tool in self.tools.values():
-            if tool.detect_state == DETECT_PRESENT:
-                detected = tool
-                detected_names.append(tool.name)
+        for t in self.tools.values():
+            if t.detect_state == DETECT_PRESENT:
+                detected = t
+                detected_names.append(t.name)
         if len(detected_names) > 1:
             self.gcode.respond_info("Multiple tools detected: %s" % (detected_names,))
             detected = None
-        if detected != self.detected_tool and not self.status in [STATUS_CHANGING, STATUS_INITIALIZING]:
+        if detected != self.detected_tool and not self.status in [STATUS_CHANGING, STATUS_INITIALIZING] and not self.printer.is_shutdown():# and self.is_printer_ready:
             if detected and not self.detected_tool:
-                    self.run_gcode('on_tool_mounted_gcode', 
-                                    self.on_tool_mounted_gcode, {'tool': detected})
+                self.run_gcode('on_tool_mounted_gcode', 
+                               detected.on_tool_mounted_gcode, {'tool': detected})
             elif not detected and self.detected_tool:
-                if self.active_tool == self.detected_tool:
-                    self.run_gcode('on_tool_removed_gcode', 
-                                    self.on_tool_removed_gcode, {'tool': self.detected_tool})
+                self.run_gcode('on_tool_removed_gcode', 
+                               self.detected_tool.on_tool_removed_gcode, {'tool': self.detected_tool})
         self.detected_tool = detected
         
     def require_detected_tool(self, respond_info):
