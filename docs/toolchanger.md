@@ -78,6 +78,9 @@ gcode_z_offset: <mm>
 params_*: <python literal>                # overrides inherited parameters
 ```
 
+Tool G-code offsets are applied independently from user G-code offsets.
+User G-code offsets are preserved across tool changes.
+
 ---
 
 ## Templates
@@ -209,13 +212,29 @@ SET_TOOL_TEMPERATURE [T=<n>] TARGET=<temp> [WAIT=0]
 
 Sets tool temperature.
 
+### `ENTER_DOCKING_MODE`
+
+```
+ENTER_DOCKING_MODE
+```
+
+Manually enters docking mode, clearing tool and G-code offsets. Primarily for dock alignment.
+
+### `EXIT_DOCKING_MODE`
+
+```
+EXIT_DOCKING_MODE
+```
+
+Exits manual docking mode.
+
 ### `TEST_TOOL_DOCKING`
 
 ```
 TEST_TOOL_DOCKING
 ```
 
-Docks and undocks the current tool.
+Docks and undocks the current tool. Requires docking mode.
 
 ### `SET_TOOL_PARAMETER`
 
