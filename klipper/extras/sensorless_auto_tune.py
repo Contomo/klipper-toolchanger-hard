@@ -1,386 +1,763 @@
-from typing import Dict, Any, Optional
+from __future__ import annotations
 
-AXES: Dict[str, int] = {'X': 0, 'Y': 1, 'Z': 2}
+from typing import List, Dict, Optional, Any, Iterator, Tuple, Deque
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+import inspect, math
+
+try:
+    from klippy import homing  # Kalico
+except ImportError:
+    from . import homing  # Klipper
+
+
+TRINAMIC_DRIVERS: List[str] = ["tmc2130", "tmc2208", "tmc2209", "tmc2240", "tmc2660", "tmc5160"]
+AXIS_TO_INDEX: Dict[str, int] = {"X": 0, "Y": 1, "Z": 2, "x": 0, "y": 1, "z": 2}
+
+PREFLIGHT_DISTANCE_MAX_MOVE: float = 10.0
+MAX_WALL_SHRINK_HOMING: float = 1.0
+WALL_REPORT_DELTA: float = 0.1
+
+def _linspace(a: float, b: float, steps: int) -> List[float]:
+    if steps <= 1:
+        return [0.5 * (a + b)]
+    out = []
+    for i in range(steps):
+        t = i / float(steps - 1)
+        out.append(a + (b - a) * t)
+    return out
+
+
+def _cluster_mean(vals: List[float], tol: float, min_samples: int) -> Optional[float]:
+    n = len(vals)
+    if n < min_samples:
+        return None
+
+    s = sorted(vals)
+    ps = [0.0]
+    for v in s:
+        ps.append(ps[-1] + v)
+
+    best_n = 0
+    best_mean = None
+    i = 0
+    for j, vj in enumerate(s):
+        while vj - s[i] > tol:
+            i += 1
+        cnt = j - i + 1
+        if cnt < min_samples:
+            continue
+        mean = (ps[j + 1] - ps[i]) / cnt
+        if (cnt > best_n) or (cnt == best_n and (best_mean is None or mean > best_mean)):
+            best_n = cnt
+            best_mean = mean
+
+    return best_mean
+
+
+@dataclass(frozen=True)
+class HomeResult:
+    triggered: bool
+    moved_mm: float
+
+W_CUR = 9
+W_RUN = 7
+
+RUN_OK = 0
+RUN_EARLY = 1
+RUN_OVER = 2
+
+@dataclass(frozen=True)
+class RunResult:
+    status: int
+    moved_mm: float = 0.0
+
+@dataclass
+class TunePoint:
+    sgt: int
+    current: float
+    baseline: float
+    threshold: float
+    run_results: List[RunResult] = field(default_factory=list)
+
+    @property
+    def early(self) -> int:
+        return sum(1 for r in self.run_results if r.status == RUN_EARLY)
+
+    @property
+    def no_trigger(self) -> int:
+        return sum(1 for r in self.run_results if r.status == RUN_OVER)
+
+    @property
+    def moved_wall(self) -> List[float]:
+        return [r.moved_mm for r in self.run_results if r.status == RUN_OK]
+
+    @property
+    def valid(self) -> bool:
+        return self.no_trigger == 0 and self.early == 0 and bool(self.moved_wall)
+
+    def mean_std(self) -> Tuple[float, float]:
+        vals = self.moved_wall
+        n = len(vals)
+        if n == 0:
+            return 0.0, 0.0
+        mean = sum(vals) / n
+        if n < 2:
+            return mean, 0.0
+        var = sum((x - mean) ** 2 for x in vals) / (n - 1)
+        return mean, math.sqrt(var)
+
+    def safety(self) -> float:
+        mean, _ = self.mean_std()
+        return mean - self.threshold
+
+    def format_row(self, runs_per_test: int) -> str:
+        cells = [f"{self.current:>{W_CUR}.2f}"]
+
+        for i in range(runs_per_test):
+            if i < len(self.run_results):
+                rr = self.run_results[i]
+                if rr.status == RUN_OK:
+                    cells.append(f"{rr.moved_mm:>{W_RUN}.3f}")
+                elif rr.status == RUN_EARLY:
+                    cells.append(f"{'X':^{W_RUN}}")
+                else:
+                    cells.append(f"{'O':^{W_RUN}}")
+            else:
+                cells.append(f"{'n/a':^{W_RUN}}")
+
+        return "|" + "|".join(cells) + "|"
+
+
+def format_sgt_table(sgt: int, row: List[TunePoint], runs_per_test: int) -> str:
+    lines = [f"SGT {sgt} (X -> early trigger, O -> overtravel, n/a -> skipped)"]
+
+    hdr = r"cur\run"
+    header_cells = [f"{hdr:^{W_CUR}}"] + [
+        f"{('r' + str(i + 1)):^{W_RUN}}" for i in range(runs_per_test)
+    ]
+    lines.append("|" + "|".join(header_cells) + "|")
+
+    for pt in row:
+        lines.append(pt.format_row(runs_per_test))
+
+    return "\n".join(lines)
+
+
+@dataclass
+class DistanceSeries:
+    tol: float
+    confirm: int
+    window: int
+    max_shrink: float
+    wall_dist: Optional[float] = None
+
+    vals: Deque[float] = field(default_factory=deque)
+    best: Optional[float] = None
+
+    def cap(self) -> Optional[float]:
+        return self.best if self.best is not None else self.wall_dist
+
+    def append(self, v: float) -> bool:
+        """appends value -> best updated?: True|False"""
+        self.vals.append(v)
+        if len(self.vals) > self.window:
+            self.vals.popleft()
+
+        cand = self._candidate()
+        if cand is None:
+            return False
+
+        if self.best is None:
+            self.best = cand
+            return True
+
+        if cand >= self.best:
+            self.best = cand
+            return True
+
+        if self.best - cand <= self.max_shrink:
+            self.best = cand
+            return True
+
+        return False
+
+    def _candidate(self) -> Optional[float]:
+        if len(self.vals) < self.confirm:
+            return None
+
+        s = sorted(self.vals)
+        i = 0
+        best_cnt = 0
+        best_cand = None
+
+        for j, vj in enumerate(s):
+            while vj - s[i] > self.tol:
+                i += 1
+            cnt = j - i + 1
+            if cnt < self.confirm:
+                continue
+
+            cand = s[j]
+            if cnt > best_cnt or (cnt == best_cnt and (best_cand is None or cand > best_cand)):
+                best_cnt = cnt
+                best_cand = cand
+
+        return best_cand
+
 
 
 class SensorlessAutoTune:
-    """Finished module: MCU-steps-based measurement, window = tolerance + optional first-approach pre-bias, clean I/O."""
-
     def __init__(self, config):
-        self.printer  = config.get_printer()
-        self.gcode    = self.printer.lookup_object('gcode')
-        self.toolhead = None
-        self.kin      = None
+        self.config = config
+        self.printer = config.get_printer()
+        self.gcode = self.printer.lookup_object("gcode")
 
-        self._p1_baseline: Dict[str, float] = {}  # axis letter -> baseline distance from Phase 1
-        self.homing_timeout_info: Optional[dict] = None  # {'ax', 'stepper_names', ['start'], 'dvec'}
+        self.stepper_name = config.get_name().split(None, 1)[-1]
+        if not config.has_section(self.stepper_name):
+            raise config.error("Could not find stepper config section '[%s]'" % (self.stepper_name,))
 
-        rs = config.get('restore_speed', None)
-        self.restore_speed: Optional[float] = (float(rs) if rs is not None else None)
+        self.axis = config.get("axis", self.stepper_name[-1])
+        if self.axis not in AXIS_TO_INDEX:
+            raise config.error("x/y/z only for now.")
 
-        self.gcode.register_command('SENSORLESS_AUTOTUNE', self.cmd_SENSORLESS_AUTOTUNE, self.cmd_SENSORLESS_AUTOTUNE_help)
-        self.gcode.register_command('FIND_AXIS_CONSTRAINTS', self.cmd_FIND_AXIS_CONSTRAINTS, self.cmd_FIND_AXIS_CONSTRAINTS_help)
-        self.printer.register_event_handler('klippy:connect', self._on_connect)
-        self.printer.register_event_handler('homing:homing_move_begin', self._on_hmove_begin)
-        self.printer.register_event_handler('homing:homing_move_end',   self._on_hmove_end)
+        self.tmc_name = None
+        for driver in TRINAMIC_DRIVERS:
+            sec = "%s %s" % (driver, self.stepper_name)
+            if config.has_section(sec):
+                self.tmc_name = sec
+                break
+        if self.tmc_name is None:
+            raise config.error("Could not find any TMC driver config section for '%s'" % (self.stepper_name,))
+            
+        _cur_defaults = self._get_current_defaults(config, self.tmc_name)
+        self.home_current_min = config.getfloat(
+            "home_current_min", _cur_defaults[0], minval=0.0
+        )
+        self.home_current_max = config.getfloat(
+            "home_current_max", _cur_defaults[1], minval=self.home_current_min
+        )
+        self.home_current_steps = config.getint(
+            "home_current_steps", 1, minval=1
+        )
 
-        self._status: Dict[str, Any] = {}
+        self.runs_per_test = config.getint("runs_per_test", 1, minval=1)
+
+        self.overtravel_window = config.getfloat("overtravel_window", 0.25, minval=0.0)
+        self.restore_speed = config.getfloat("restore_speed", 100.0, above=0.0)
+
+        self.stall_min = config.getint("stall_min", None)
+        self.stall_max = config.getint("stall_max", None)
+
+        self.gcode.register_mux_command(
+            "SENSORLESS_AUTOTUNE",
+            "AXIS",
+            self.axis,
+            self.cmd_SENSORLESS_AUTOTUNE,
+            desc=self.cmd_SENSORLESS_AUTOTUNE_help,
+        )
+
+        self.gcode.register_mux_command(
+            "SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS",
+            "AXIS",
+            self.axis,
+            self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS,
+            desc=self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help,
+        )
+
+        self.printer.register_event_handler("klippy:connect", self._on_connect)
+        self.printer.register_event_handler("homing:homing_move_end", self._on_hmove_end)
+        self.printer.register_event_handler("homing:homing_move_begin", self._on_hmove_begin)
+
+        self._hm_kin_spos0: Optional[Dict[str, Any]] = None
+        self._hm_last_dvec = None
+
+    def _get_current_defaults(self, config, tmc_name):
+        tmc_cfg  = config.getsection(tmc_name)
+        home_cur = tmc_cfg.getfloat("home_current", None, note_valid=False)
+        run_cur  = tmc_cfg.getfloat("run_current",  1.0, note_valid=False)
+        if home_cur is not None:
+            return (0.80 * home_cur, 1.20 * home_cur)
+        return (0.60 * run_cur, run_cur)
+
 
     def _on_connect(self):
-        self.toolhead = self.printer.lookup_object('toolhead')
-        self.kin      = self.toolhead.get_kinematics()
+        self.toolhead = self.printer.lookup_object("toolhead")
+        self.kin = self.toolhead.get_kinematics()
 
-    def _hmove_is_intecting_arm(self, hmove) -> bool:
-        info = self.homing_timeout_info
-        if not info:
-            return False
-        try:
-            es_names = {s.get_name() for es in hmove.get_mcu_endstops() for s in es.get_steppers()}
-            return bool(es_names.intersection(info['stepper_names']))
-        except Exception:
-            return False
+        self.tmc_object = self.printer.lookup_object(self.tmc_name)
+        self.stall_manager = StallField.from_cmdhelper(self.tmc_object.get_status.__self__, self.toolhead)
+        
+        self.stall_min = self.config.getint(
+            "stall_min",
+            self.stall_manager.value_min,
+            minval=self.stall_manager.value_min,
+            maxval=self.stall_manager.value_max,
+        )
+        self.stall_max = self.config.getint(
+            "stall_max",
+            self.stall_manager.value_max,
+            minval=self.stall_manager.value_min,
+            maxval=self.stall_manager.value_max,
+        )
 
-    def _arm_home(self, axis: str, *, window: Optional[float] = None, mode: str = 'plus') -> dict:
-        ax   = AXES[axis]
-        rail = self.kin.rails[ax]
-        hi   = rail.get_homing_info()
-        info = {'ax': ax, 'stepper_names': {s.get_name() for s in rail.get_steppers()}}
-        if window is None:
-            return info
-        sgn    = 1.0 if hi.positive_dir else -1.0
-        end    = float(hi.position_endstop)
-        base   = abs(float(self._p1_baseline.get(axis, 0.0)))
-        total  = abs(window) if mode == 'abs' else abs(window) + base
-        info['start'] = end - sgn * total  # pre-bias FIRST approach start
-        return info
 
     def _on_hmove_begin(self, hmove, *args):
-        if not self._hmove_is_intecting_arm(hmove):
-            return
-        info = self.homing_timeout_info or {}
-        if 'start' in info:
-            cur = list(self.toolhead.get_position())
-            cur[info['ax']] = float(info['start'])
-            self.toolhead.set_position(cur)
-        if info:
-            info.pop('dvec', None)
+        self._hm_kin_spos0 = { s.get_name(): s.get_commanded_position() 
+                               for s in self.kin.get_steppers() }
 
     def _on_hmove_end(self, hmove, *args):
-        if not self._hmove_is_intecting_arm(hmove):
+        spos0, self._hm_kin_spos0 = self._hm_kin_spos0, None
+        if spos0 is None or self._hm_last_dvec is not None:
             return
-        stepper_positions = getattr(hmove, 'stepper_positions', None)
-        if not stepper_positions:
-            raise self.gcode.command_error("internal error: homing move did not report stepper positions")
-        kin = self.kin
-        kin_s0 = {s.get_name(): 0.0 for s in kin.get_steppers()}
-        kin_s1 = dict(kin_s0)
-        for sp in stepper_positions:
-            s = sp.stepper
-            n = s.get_name()
-            d_mm = float(sp.trig_pos - sp.start_pos) * float(s.get_step_dist())
-            kin_s1[n] = d_mm
-        p0 = kin.calc_position(kin_s0)
-        p1 = kin.calc_position(kin_s1)
-        dvec = [(b or 0.0) - (a or 0.0) for a, b in zip(p0, p1)]
-        if self.homing_timeout_info is not None:
-            self.homing_timeout_info['dvec'] = dvec
 
-    def _home_once_and_measure(self, axis: str, *, gcmd, window: Optional[float], window_mode: str = 'plus'):
-        ax = AXES[axis]
-        self.homing_timeout_info = self._arm_home(axis, window=window, mode=window_mode)
-        err_msg = None
-        st = self.toolhead.get_status(self.printer.get_reactor().monotonic())
-        pre_homed_axes = set((st.get('homed_axes') or ""))
-        try:
-            self.gcode.run_script_from_command("G28 %s" % axis)
-        except self.printer.command_error as e:
-            err_msg = str(e)
-        self.toolhead.wait_moves()
-        info = self.homing_timeout_info or {}
-        dvec = info.get('dvec')
-        self.homing_timeout_info = None
-        if dvec is None:
-            raise gcmd.error("internal error: No distance captured from homing move")
-        distance = float(dvec[ax])
-        post = self.toolhead.get_position()
-        if err_msg:
-            self.toolhead.set_position(post, homing_axes=pre_homed_axes)
+        trig_steps = {sp.stepper_name: int(sp.trig_pos - sp.start_pos)
+                      for sp in hmove.stepper_positions}
 
-        targets = list(post) # subtract the full measured delta in tool space
-        for i, di_raw in enumerate(dvec):
-            if i >= len(targets):
-                break
-            di = float(di_raw or 0.0)
-            targets[i] = float(post[i] - di)
+        p0 = self.kin.calc_position(spos0)
+        p1 = hmove.calc_toolhead_pos(spos0, trig_steps)
+        self._hm_last_dvec = [b - a for a, b in zip(p0, p1)]
 
-        for i in range(min(len(targets), len(dvec))): # per-axis range check only when we actually change that axis
-            if abs(targets[i] - post[i]) > 1e-9:
-                rmin, rmax = self.kin.rails[i].get_range()
-                if not (rmin <= targets[i] <= rmax):
-                    di = float(dvec[i] or 0.0)
-                    raise gcmd.error(
-                        "internal error: cannot restore axis %d: %.2f <= %.2f <= %.2f (dvec: %.3f, post: %.3f)"
-                        % (i, rmin, targets[i], rmax, di, post[i])
-                    )
-        # move back in one shot
-        hi = self.kin.rails[AXES[axis]].get_homing_info()
-        restore_v = self.restore_speed if (self.restore_speed is not None) else float(hi.speed)
-        self.toolhead.manual_move(targets, restore_v)
-        self.toolhead.wait_moves()
-        return distance, err_msg
 
-    def _run_preflight_check(self, sgh, gcmd):
-        # Slam to max sensitivity then do a short, pre-biased approach; fail loudly if no trigger.
-        sgh.bump(-999)
-        moved, err = self._home_once_and_measure(sgh.axis, gcmd=gcmd, window=10.0, window_mode='abs')
-        if err and 'No trigger' in err:
-            raise gcmd.error("Pre-flight FAILED: sensorless did not trigger at max sensitivity; check DIAG wiring and mechanics.")
-        self.toolhead.wait_moves()
-        return abs(moved)
+    def home_once_and_measure(self, max_distance: Optional[float] = None, *, reverse_dir: bool = False) -> HomeResult:
+        ax = AXIS_TO_INDEX[self.axis]
+        rail = self.kin.rails[ax]
+        hi = rail.get_homing_info()
 
-    cmd_SENSORLESS_AUTOTUNE_help = """SENSORLESS_AUTOTUNE AXIS=<X|Y|Z> [MIN_MOVE=<float>] [WINDOW=<float>] [START=<int>] [STOP=<int>]"""
+        pos_min, pos_max = rail.get_range()
+        if max_distance is None:
+            max_distance = 1.5 * (pos_max - pos_min)
+        positive_dir_eff = hi.positive_dir ^ reverse_dir
 
-    def cmd_SENSORLESS_AUTOTUNE(self, gcmd):
-        axis = gcmd.get('AXIS', '').upper()
-        if not axis or axis[0] not in AXES:
-            raise gcmd.error("Specify AXIS=X|Y|Z (got %r)" % (axis,))
-        axis = axis[0]
-        sgh   = AxisStallGuard(self.printer, axis, gcmd=gcmd)
-        field = sgh.info['field']
-        more  = sgh.info['more_sensitive_step']
-        vmin, vmax = sgh.info['value_min'], sgh.info['value_max']
-        max_sens, min_sens = sgh.info['max_sensitive'], sgh.info['min_sensitive']
-        _dwell    = gcmd.get_float('DWELL', 0.10, above=0.0) / 2.0
-        window   = gcmd.get_float('WINDOW', 0.25, minval=0.0)
-        start    = gcmd.get_int('START', max_sens)
-        stop     = gcmd.get_int('STOP',  min_sens)
-        legal_min, legal_max = min(vmin, vmax), max(vmin, vmax)
-        if not (legal_min <= start <= legal_max) or not (legal_min <= stop <= legal_max):
-            raise gcmd.error("START/STOP out of range (got %d, %d) — legal: [%d, %d]." % (start, stop, legal_min, legal_max))
-        
-        if (more > 0 and start < stop) or (more < 0 and start > stop):
-            raise gcmd.error("Invalid START/STOP ordering. Begin near most sensitive (%d) ⇒ sweep to %d." % (max_sens, min_sens))
+        position_target = pos_max if positive_dir_eff else pos_min
 
-        _min_move = self._run_preflight_check(sgh, gcmd)
-        min_move  = gcmd.get_float('MIN_MOVE', _min_move * 2, above=0.0)
-        gcmd.respond_info("[P1] Testing: %d >>> %d until move over %.2f" % (start, stop, _min_move * 2))
+        npos = len(self.toolhead.get_position())
+        homepos = [None] * npos
+        homepos[ax] = position_target
 
-        # Phase 1 ---------- find first OK --------------------------------------------------
-        cur = sgh.set(start)
-        first_ok = None
-        distance_to_home = None
-        guard = abs(stop - start) + 2
-        while guard > 0:
-            guard -= 1
-            moved, err = self._home_once_and_measure(axis, gcmd=gcmd, window=None)
-            self.printer.get_reactor().pause(_dwell)
-            if err:
-                raise gcmd.error("[P1] Homing errored.")
-            if abs(moved) >= min_move:
-                first_ok, distance_to_home = cur, abs(moved)
-                gcmd.respond_info("[P1] try: %d, moved: %.2f mm (success)" % (cur, abs(moved)))
-                break
-            if cur == stop:
-                break
-            gcmd.respond_info("[P1] try: %d, moved: %.2f mm" % (cur, abs(moved)))
-            cur = sgh.bump(+1)
-            self.printer.get_reactor().pause(_dwell)
-        if first_ok is None:
-            raise gcmd.error("No working value found within sweep.")
-        self._p1_baseline[axis] = float(distance_to_home)
+        start = position_target - (1.0 if positive_dir_eff else -1.0) * max_distance  # type: ignore
+        forcepos = [None] * npos
+        forcepos[ax] = start
 
-        # Phase 2 ---------- advance until first FAIL (late trigger = moved too much) --------
-        gcmd.respond_info("[P2] Testing: (%d >>> %d)" % (first_ok, stop))
-        last_ok = first_ok
-        while True:
-            if cur == stop:
-                break
-            cur = sgh.bump(+1)
-            self.printer.get_reactor().pause(_dwell)
-            moved, err = self._home_once_and_measure(axis, gcmd=gcmd, window=window, window_mode='plus')
-            self.printer.get_reactor().pause(_dwell)
-            expected_max = distance_to_home + window
-            if not err and (abs(moved) <= expected_max):
-                gcmd.respond_info("[P2] try: %d: moved: %.2f mm" % (cur, abs(moved)))
-                last_ok = cur
-                continue
-            if abs(moved) > expected_max:
-                raise gcmd.error("[P2] Moved too much at try %d (%.2f mm > %.2f mm)" % (cur, abs(moved), expected_max))
-            break
+        self._hm_kin_spos0 = None
+        self._hm_last_dvec = None
 
-        v_lo, v_hi = (first_ok, last_ok) if first_ok <= last_ok else (last_ok, first_ok)
-        recommend = v_lo + (v_hi - v_lo) // 2
-        sgh.set(recommend)
-        gcmd.respond_info("Done testing %s\nRecommended value: %s=%d\nWorking range: %d <-> %d\nValues staged for SAVE_CONFIG" % (sgh._stepper, field.upper(), recommend, v_lo, v_hi))
-        self._status[axis] = {'min_ok': v_lo, 'max_ok': v_hi, 'stepper': sgh._stepper}
-        cfg = self.printer.lookup_object('configfile')
-        option = 'driver_' + field.upper()
-        cfg.set(sgh.name, option, int(recommend))
+        triggered = True
+        with self._preserve_position(self.restore_speed):
+            try:
+                hs = homing.Homing(self.printer)
+                hs.set_axes([ax])
+                hs.home_rails([rail], forcepos, homepos)
+            except self.printer.command_error as e:
+                msg = str(e)
+                if "No trigger on" in msg:
+                    triggered = False
+                elif self._hm_last_dvec is not None:
+                    triggered = True
+                else:
+                    raise
 
-    cmd_FIND_AXIS_CONSTRAINTS_help = """FIND_AXIS_CONSTRAINTS AXIS=<X|Y|Z>\nHome both directions to infer axis min/max"""
-
-    def cmd_FIND_AXIS_CONSTRAINTS(self, gcmd):
-        axis = (gcmd.get('AXIS', '') or '').upper()
-        if not axis or axis[0] not in AXES:
-            raise gcmd.error("Specify AXIS=X|Y|Z (got %r)" % (axis,))
-        axis = axis[0]
-
-        ax = AXES[axis]
-        rail            = self.kin.rails[ax]
-        hi              = rail.get_homing_info()
-        rmin, rmax      = rail.get_range()
-        
-        orig_dir = bool(hi.positive_dir) # True => endstop near max
-        orig_end = float(hi.position_endstop) # coordinate of normal-side endstop
-
-        rail.homing_positive_dir = (not orig_dir)
-        rail.position_endstop = float(rmin if orig_dir else rmax)
-        try:
-            moved_A, errA = self._home_once_and_measure(axis, gcmd=gcmd, window=None)
-        finally:
-            rail.homing_positive_dir = orig_dir
-            rail.position_endstop = float(orig_end)
-
-        if errA:
-            raise gcmd.error("Opposite-direction G28 failed: %s" % errA)
-        exp_sign_A = -1.0 if orig_dir else +1.0
-        if abs(moved_A) > 0.01 and moved_A * exp_sign_A <= 0.0:
-            raise gcmd.error("[%s] Opposite-direction G28 moved the wrong way (Δ=%.3f mm)." % (axis, moved_A))
-
-        moved_B, errB = self._home_once_and_measure(axis, gcmd=gcmd, window=None)
-        if errB:
-            raise gcmd.error("Normal-direction G28 failed: %s" % errB)
-        exp_sign_B = +1.0 if orig_dir else -1.0
-        if abs(moved_B) > 0.01 and moved_B * exp_sign_B <= 0.0:
-            raise gcmd.error("[%s] Normal-direction G28 moved the wrong way (Δ=%.3f mm)." % (axis, moved_B))
-
-        length = abs(moved_A) + abs(moved_B)
-        span = abs(float(rmax) - float(rmin)) or 1.0
-        if not (0.40 * span <= length <= 1.60 * span):
-            gcmd.respond_info("[%s] Measured travel %.3f mm out of expected range (~%.3f mm)." % (axis, length, span))
-
-        if orig_dir:
-            est_max = orig_end
-            est_min = orig_end - length
+        if (not triggered) or (self._hm_last_dvec is None):
+            result = HomeResult(False, 0.0)
         else:
-            est_min = orig_end
-            est_max = orig_end + length
+            moved = abs(float(self._hm_last_dvec[ax]))
+            result = HomeResult(True, moved if moved > 0.0 else 0.0)
 
-        gcmd.respond_info("[%s] travel=%.3f mm (|opposite|=%.3f + |normal|=%.3f); endstop@=%.3f => min=%.3f, max=%.3f"
-                          % (axis, length, abs(moved_A), abs(moved_B), orig_end, est_min, est_max))
+        self._hm_last_dvec = None
+        return result
 
-        # Stage for SAVE_CONFIG
-        cfg = self.printer.lookup_object('configfile')
-        stepper_section = rail.get_name()
-        cfg.set(stepper_section, 'position_min', float(est_min))
-        cfg.set(stepper_section, 'position_max', float(est_max))
-        gcmd.respond_info("Staged for SAVE_CONFIG: [%s] position_min=%.3f, position_max=%.3f" % (stepper_section, est_min, est_max))
+
+    cmd_SENSORLESS_AUTOTUNE_help = """Run sensorless homing autotune over SGT/current grid."""
+    def cmd_SENSORLESS_AUTOTUNE(self, gcmd):
+        # ---------------- parameters ----------------
+        overtravel = gcmd.get_float(
+            "OVERTRAVEL_WINDOW", self.overtravel_window, minval=0.0
+        )
+        runs_per_test = gcmd.get_int(
+            "RUNS_PER_TEST", self.runs_per_test, minval=1
+        )
+        cur_min = gcmd.get_float(
+            "HOME_CURRENT_MIN", self.home_current_min, minval=0.0
+        )
+        cur_max = gcmd.get_float(
+            "HOME_CURRENT_MAX", self.home_current_max, minval=0.0
+        )
+        cur_steps = gcmd.get_int(
+            "HOME_CURRENT_STEPS", self.home_current_steps, minval=1
+        )
+        stall_min = gcmd.get_int(
+            "STALL_MIN", self.stall_min,
+            minval=self.stall_manager.value_min,
+            maxval=self.stall_manager.value_max,
+        )
+        stall_max = gcmd.get_int(
+            "STALL_MAX", self.stall_max,
+            minval=stall_min,
+            maxval=self.stall_manager.value_max,
+        )
+
+        sgt_vals = self.stall_manager.ordered_least_to_most_sensitive(stall_min, stall_max)
+        sgt_vals.reverse()
+        currents = _linspace(cur_min, cur_max, cur_steps)
+
+        # ---------------- preflight ----------------
+        with self.stall_manager.temporary(self.stall_manager.max_sensitive):
+            pre = self.home_once_and_measure(max_distance=PREFLIGHT_DISTANCE_MAX_MOVE)
+
+        if not pre.triggered:
+            raise gcmd.error(
+                "Precheck failed: no stall within %.1fmm at max sensitivity" % PREFLIGHT_DISTANCE_MAX_MOVE
+            )
+
+        min_move_threshold_dist = pre.moved_mm + min(10.0, max(pre.moved_mm * 0.5, 2.0))
+
+        wall_dist: Optional[float] = None
+        ax = AXIS_TO_INDEX[self.axis]
+        rail = self.kin.rails[ax]
+        hi = rail.get_homing_info()
+
+        et = self.printer.get_reactor().monotonic()
+        homed_axes = self.toolhead.get_status(et).get("homed_axes", "")
+        if self.axis.lower() in homed_axes:
+            wall_dist = abs(hi.position_endstop - self.toolhead.get_position()[ax])
+
+        wall = DistanceSeries(
+            tol=MAX_WALL_SHRINK_HOMING,
+            confirm=2,
+            window=8,
+            max_shrink=MAX_WALL_SHRINK_HOMING,
+            wall_dist=wall_dist,
+        )
+        gcmd.respond_info(
+            "Sensorless autotune starting:\n"
+            "  SGT: %d..%d (%d)\n"
+            "  Current: %.3f..%.3f (%d)\n"
+            "  Runs/pt: %d\n"
+            "  Baseline: %.3fmm  Threshold: %.3fmm\n"
+            "  Overtravel: %.3fmm"
+            % (stall_min, stall_max, len(sgt_vals),
+                currents[0], currents[-1], len(currents),
+                runs_per_test,
+                pre.moved_mm, min_move_threshold_dist,
+                overtravel)
+        )
+
+        grid: List[List[TunePoint]] = []
+
+        for sgt in sgt_vals:
+            row: List[TunePoint] = []
+            grid.append(row)
+
+            for cur in currents:
+                pt = TunePoint(
+                    sgt=sgt,
+                    current=cur,
+                    baseline=pre.moved_mm,
+                    threshold=min_move_threshold_dist,
+                )
+
+                with (self._temporary_home_current(cur),
+                      self.stall_manager.temporary(int(sgt))):
+                    for _ in range(runs_per_test):
+                        cap = wall.cap()
+                        max_dist = None if cap is None else cap + overtravel
+                        r = self.home_once_and_measure(max_distance=max_dist)
+
+                        if not r.triggered:
+                            pt.run_results.append(RunResult(RUN_OVER))
+                            break
+
+                        cap = wall.cap()
+                        wall_slack = MAX_WALL_SHRINK_HOMING + overtravel
+                        if r.moved_mm <= min_move_threshold_dist or (cap is not None and r.moved_mm < cap - wall_slack):
+                            pt.run_results.append(RunResult(RUN_EARLY))
+                            break
+                        pt.run_results.append(RunResult(RUN_OK, r.moved_mm))
+
+                        prev_best = wall.best
+                        best_changed = wall.append(r.moved_mm)
+                        #if (best_changed and
+                        #    (prev_best is None or abs(wall.best - prev_best) >= WALL_REPORT_DELTA)   # type: ignore
+                        #):
+                        #    gcmd.respond_info("new distance to endstop: %.3f" % wall.best)
+                row.append(pt)
+            gcmd.respond_info(format_sgt_table(sgt, row, runs_per_test))
+
+        candidates = [pt for row in grid for pt in row if pt.valid]
+
+        if not candidates:
+            gcmd.respond_info("no stable region found")
+            return
+                
+        candidates.sort(key=lambda p: (p.mean_std()[1], -p.safety()))
+        best = candidates[0]
+    
+        ch = self.tmc_object.get_status.__self__.current_helper
+        prev = ch.get_current()
+
+        supports_home_current = (
+            hasattr(ch, "set_home_current")
+            and hasattr(ch, "req_home_current")
+            and len(prev) >= 5
+        )
+        configfile = self.printer.lookup_object("configfile")
+
+        driver_key = f"driver_{self.stall_manager.field.upper()}"
+        configfile.set(self.tmc_name, driver_key, best.sgt)
+        lines = [
+            f"Staged result(s) for SAVE_CONFIG in [{self.tmc_name}]:",
+            f"  {driver_key}: {best.sgt}",
+        ]
+        if supports_home_current:
+            configfile.set(self.tmc_name, "home_current", f"{best.current:.3f}")
+            lines.append(f"- home_current: {best.current:.3f}")
+        else:
+            lines.append(f"- remember to manually set your home current! {best.current:.3f}")
+
+        mean, std = best.mean_std()
+        lines += [
+            "Best test:",
+            f"- mean/std = {mean:.6f} / {std:.3g}",
+        ]
+        gcmd.respond_info("\n".join(lines))
+
+
+    cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help = """
+    Home both directions from the same start position to estimate span
+    """
+    def cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS(self, gcmd):
+        margin = gcmd.get_float("MARGIN", 0.1, minval=0.0)
+
+        ax = AXIS_TO_INDEX[self.axis]
+        rail = self.kin.rails[ax]
+        hi = rail.get_homing_info()
+
+        r1 = self.home_once_and_measure()
+        r2 = self.home_once_and_measure(reverse_dir=True)
+        if not r2.triggered or not r1.triggered:
+            raise gcmd.error("homing seemed to have failed")
+
+        span = r1.moved_mm + r2.moved_mm
+
+        pos_min, pos_max = rail.get_range()
+        if abs(hi.position_endstop - pos_min) <= abs(pos_max - hi.position_endstop):
+            opposite, stage_key = hi.position_endstop + span - margin, "position_max"
+        else:
+            opposite, stage_key = hi.position_endstop - span + margin, "position_min"
+
+        configfile = self.printer.lookup_object("configfile")
+        configfile.set(self.stepper_name, stage_key, "%.2f" % opposite)
+        gcmd.respond_info("Axis span: %.3fmm, new %s: %.2f" % (span, stage_key, opposite))
+        gcmd.respond_info("Staged for SAVE_CONFIG in [%s]:" % self.stepper_name)
+
+
+    @contextmanager
+    def _preserve_position(self, restore_speed: float) -> Iterator[None]:
+        self.toolhead.wait_moves()
+
+        kin = self.kin
+        steppers = list(kin.get_steppers())
+
+        pos0 = list(self.toolhead.get_position())
+        limits_entry = list(kin.limits)
+        mcu0 = {s.get_name(): int(s.get_mcu_position()) for s in steppers}
+
+        try:
+            yield
+        finally:
+            self.toolhead.wait_moves()
+
+            mcu1 = {s.get_name(): int(s.get_mcu_position()) for s in steppers}
+
+            dstep_mm = {}
+            for s in steppers:
+                name = s.get_name()
+                a = mcu0.get(name)
+                b = mcu1.get(name)
+                if a is None or b is None:
+                    dstep_mm[name] = 0.0
+                else:
+                    dstep_mm[name] = (b - a) * float(s.get_step_dist())
+
+            dxyz = kin.calc_position(dstep_mm)
+            moved_phys = any(abs(float(v)) > 1e-9 for v in dxyz[:3])
+
+            def _restore_limits_to_entry():
+                for i, v in enumerate(limits_entry):
+                    kin.limits[i] = v
+
+            if not moved_phys:
+                self.toolhead.set_position(pos0)
+                _restore_limits_to_entry()
+                return
+
+            pos1_est = pos0[:]
+            for i in range(min(3, len(pos1_est), len(dxyz))):
+                pos1_est[i] = float(pos1_est[i]) + float(dxyz[i])
+
+            self.toolhead.set_position(pos1_est)
+
+            limits_tmp = list(kin.limits)
+            try:
+                for i in range(len(kin.limits)):
+                    kin.limits[i] = (float("-inf"), float("inf"))
+
+                coord = [None] * len(pos0)
+                for i in range(min(3, len(coord))):
+                    coord[i] = float(pos0[i])   # type: ignore
+
+                self.toolhead.manual_move(coord, restore_speed)
+                self.toolhead.wait_moves()
+            finally:
+                for i, v in enumerate(limits_tmp):
+                    kin.limits[i] = v
+
+            self.toolhead.set_position(pos0)
+
+            _restore_limits_to_entry()
+
+
+    @contextmanager
+    def _temporary_home_current(self, current: Optional[float]) -> Iterator[None]:
+        if current is None:
+            yield
+            return
+
+        ch = self.tmc_object.get_status.__self__.current_helper
+        prev = ch.get_current()
+        supports_home_current = (
+            len(prev) >= 5 and hasattr(ch, "set_home_current") and hasattr(ch, "req_home_current")
+        )
+        try:
+            if supports_home_current:
+                ch.set_home_current(float(current))
+            else:
+                ch.set_current(float(current), prev[2], self.toolhead.get_last_move_time())
+            yield
+        finally:
+            if supports_home_current:
+                ch.set_home_current(prev[4])
+            else:
+                ch.set_current(prev[0], prev[2], self.toolhead.get_last_move_time())
 
     def get_status(self, eventtime):
-        return dict(self._status)
+        return {}
 
-class AxisStallGuard:
-    def __init__(self, printer, axis: str, stepper_name: str = None, gcmd=None):
-        self.printer = printer
-        self.gcode   = printer.lookup_object('gcode')
-        self.axis    = axis.upper()
-        self.gcmd    = gcmd
-        kin = printer.lookup_object('toolhead').get_kinematics()
-        self._stepper = stepper_name or self._resolve_stepper_for_axis(self.axis, kin, gcmd)
-        self.name, self.tmc = self._get_tmc_for_stepper(self._stepper, gcmd)
-        # Kalico SET_TMC_FIELD only accepts the full stepper
-        self._stepper = (
-            getattr(self.tmc, "name", None)
-            or getattr(self.tmc, "stepper_name", None)
-            or self._normalize_stepper_name(self._stepper)
-        )
-        self.info    = self._compute_field_info(self.tmc, gcmd)
 
-    # --- public API ---
-    def set(self, value: int):
-        v = self._clamp(value)
-        self.gcode.run_script_from_command(
-            "SET_TMC_FIELD STEPPER=%s FIELD=%s VALUE=%d" % (self._stepper, self.info['field'], int(v))
-        )
+class StallField:
+    def __init__(
+        self,
+        *,
+        field: str,
+        value_min: int,
+        value_max: int,
+        more_sensitive_step: int,
+        fields: object,
+        toolhead: object,
+        mcu_tmc: object,
+    ):
+        self.field = field
+        self.value_min = int(value_min)
+        self.value_max = int(value_max)
+        self.more_sensitive_step = int(more_sensitive_step)
+
+        self.toolhead = toolhead
+
+        self._fields = fields
+        self._mcu_tmc = mcu_tmc
+
+        reg = self._fields.lookup_register(self.field, None)  # type: ignore
+        if reg is None:
+            raise RuntimeError("Stall field '%s' has no register" % (self.field,))
+        self._reg = reg
+
+        sig = None
+        try:
+            sig = inspect.signature(self._mcu_tmc.set_register)  # type: ignore
+        except Exception:
+            pass
+        self._supports_print_time = bool(sig is None or len(sig.parameters) >= 3)
+
+    @classmethod
+    def from_cmdhelper(cls, cmdhelper: object, toolhead) -> "StallField":
+        fields = cmdhelper.fields  # type: ignore
+        for field in ("sgthrs", "sg4_thrs", "sgt"):
+            reg = fields.lookup_register(field, None)
+            if reg not in fields.all_fields or field not in fields.all_fields[reg]:
+                continue
+
+            fmask = int(fields.all_fields[reg][field])
+            fwidth = int(fmask.bit_count())
+
+            if field in getattr(fields, "signed_fields", ()):
+                value_min = -(1 << (fwidth - 1))
+                value_max = (1 << (fwidth - 1)) - 1
+                more_sensitive_step = -1
+            else:
+                value_min = 0
+                value_max = (1 << fwidth) - 1
+                more_sensitive_step = +1
+
+            return cls(
+                field=field,
+                value_min=value_min,
+                value_max=value_max,
+                more_sensitive_step=more_sensitive_step,
+                fields=fields,
+                toolhead=toolhead,
+                mcu_tmc=cmdhelper.mcu_tmc,  # type: ignore
+            )
+        raise RuntimeError("Unable to detect a StallGuard threshold field on this TMC driver")
+
+    def clamp(self, v: int) -> int:
+        lo = min(self.value_min, self.value_max)
+        hi = max(self.value_min, self.value_max)
+        v = int(v)
+        if v < lo:
+            return lo
+        if v > hi:
+            return hi
         return v
 
-    def bump(self, step: int = 1):
-        cur = self.read()
-        delta = -1 * self.info['more_sensitive_step'] * int(step)
-        return self.set(cur + delta)
+    def sensitivity_key(self, v: int) -> int:
+        return int(v) * self.more_sensitive_step
+
+    @property
+    def max_sensitive(self) -> int:
+        return self.value_max if self.more_sensitive_step > 0 else self.value_min
+
+    @property
+    def min_sensitive(self) -> int:
+        return self.value_min if self.more_sensitive_step > 0 else self.value_max
+
+    def ordered_least_to_most_sensitive(self, vmin: int, vmax: int) -> List[int]:
+        vmin, vmax  = self.clamp(vmin), self.clamp(vmax)
+        lo, hi = min(vmin, vmax), max(vmin, vmax)
+        vals = list(range(int(lo), int(hi) + 1))
+        vals.sort(key=self.sensitivity_key)
+        return vals
 
     def read(self) -> int:
-        return int(self.tmc.fields.get_field(self.info['field']))
+        return int(self._fields.get_field(self.field))  # type: ignore
 
-    # --- internals ---
-    def _err(self, gcmd, msg: str):
-        if gcmd is not None:
-            raise gcmd.error(msg)
-        raise self.gcode.command_error(msg)
-
-    def _normalize_stepper_name(self, stepper_suffix: str) -> str:
-        return stepper_suffix if stepper_suffix.startswith('stepper_') else 'stepper_' + stepper_suffix
-
-    def _resolve_stepper_for_axis(self, axis: str, kin, gcmd=None) -> str:
-        """Try rails' endstops first (tmc5160 stepper_y, etc.), else fall back to stepper_<axis>."""
-        ax   = AXES[axis]
-        rail = kin.rails[ax]
-        for _, name in rail.get_endstops():
-            try:
-                self._get_tmc_for_stepper(name, gcmd)
-                return name
-            except Exception:
-                continue
-        self._get_tmc_for_stepper('stepper_' + axis.lower(), gcmd)
-        return 'stepper_' + axis.lower()
-
-    def _get_tmc_for_stepper(self, stepper_suffix: str, gcmd=None):
-        for name, obj in self.printer.lookup_objects():
-            if name.startswith('tmc') and name.endswith(stepper_suffix):
-                return name, obj
-        self._err(gcmd, "No TMC driver found for '%s'" % stepper_suffix)
-
-    def _compute_field_info(self, tmc_obj, gcmd=None) -> Dict[str, Any]:
-        fields = tmc_obj.fields
-        field = ("sgthrs" if fields.lookup_register("sgthrs", None) is not None
-                 else "sgt"  if fields.lookup_register("sgt",  None) is not None
-                 else None)
-        if field is None:
-            self._err(gcmd, "Driver lacks a StallGuard threshold field")
-
-        reg   = fields.lookup_register(field)
-        mask  = fields.all_fields[reg][field]
-        shift = (mask & -mask).bit_length() - 1
-        width = (mask >> shift).bit_length()
-
-        if field in fields.signed_fields:
-            value_min = -(1 << (width - 1))
-            value_max =  (1 << (width - 1)) - 1
-            more_sensitive_step = -1
-            signed = True
+    def write(self, value: int):
+        v = self.clamp(value)
+        reg_val = self._fields.set_field(self.field, v)  # type: ignore
+        if self._supports_print_time:
+            self._mcu_tmc.set_register(self._reg, reg_val, self.toolhead.get_last_move_time())  # type: ignore
         else:
-            value_min = 0
-            value_max = (1 << width) - 1
-            more_sensitive_step = +1
-            signed = False
+            self._mcu_tmc.set_register(self._reg, reg_val)  # type: ignore
 
-        return {
-            'field': field,
-            'value_min': value_min,
-            'value_max': value_max,
-            'more_sensitive_step': more_sensitive_step,
-            'signed': signed,
-            'max_sensitive': value_max if more_sensitive_step > 0 else value_min,
-            'min_sensitive': value_min if more_sensitive_step > 0 else value_max,
-        }
-
-    def _clamp(self, v: int) -> int:
-        if v < self.info['value_min']:
-            return self.info['value_min']
-        if v > self.info['value_max']:
-            return self.info['value_max']
-        return int(v)
+    @contextmanager
+    def temporary(self, value: int) -> Iterator[None]:
+        prev = self.read()
+        try:
+            self.write(value)
+            yield
+        finally:
+            self.write(prev)
 
 
-def load_config(config):
+def load_config_prefix(config):
     return SensorlessAutoTune(config)
