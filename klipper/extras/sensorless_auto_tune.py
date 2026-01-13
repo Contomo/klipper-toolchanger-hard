@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Dict, Optional, Any, Iterator, Tuple, Deque
+from typing import List, Dict, Optional, Any, Iterator, Tuple, Deque, Callable
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -250,18 +250,14 @@ class SensorlessAutoTune:
         self.stall_min = config.getint("stall_min", None)
         self.stall_max = config.getint("stall_max", None)
 
-        self.gcode.register_mux_command(
+        self.gcode._register_mux_axis_ci(
             "SENSORLESS_AUTOTUNE",
-            "AXIS",
-            self.axis,
             self.cmd_SENSORLESS_AUTOTUNE,
             desc=self.cmd_SENSORLESS_AUTOTUNE_help,
         )
 
-        self.gcode.register_mux_command(
+        self.gcode._register_mux_axis_ci(
             "SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS",
-            "AXIS",
-            self.axis,
             self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS,
             desc=self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help,
         )
@@ -272,6 +268,16 @@ class SensorlessAutoTune:
 
         self._hm_kin_spos0: Optional[Dict[str, Any]] = None
         self._hm_last_dvec = None
+
+    def _register_mux_axis_ci(
+        self,
+        command: str,
+        handler: Callable,
+        desc: Optional[str] = None,
+    ) -> None:
+        axis_keys = {self.axis.lower(), self.axis.upper()}
+        for key in axis_keys:
+            self.gcode.register_mux_command(command, "AXIS", key, handler, desc=desc)
 
     def _get_current_defaults(self, config, tmc_name):
         tmc_cfg  = config.getsection(tmc_name)
