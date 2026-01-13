@@ -146,6 +146,7 @@ class Toolchanger:
         self.require_tool_present = config.getboolean('require_tool_present', False)
         self.transfer_fan_speed = config.getboolean('transfer_fan_speed', True)
         self.perform_restore_move = config.getboolean('perform_restore_move', True)
+        self.raise_on_error = config.getboolean('raise_on_error', True)
         self.uses_axis = config.get('uses_axis', 'xyz').lower()
         home_options = {'abort': ON_AXIS_NOT_HOMED_ABORT,
                         'home': ON_AXIS_NOT_HOMED_HOME}
@@ -545,7 +546,10 @@ class Toolchanger:
             # --------------------------------------------------------------------
             # Standard error handling, only from validate or SELECT_TOOL_ERROR
             if self.status == STATUS_ERROR: # gets set by validate detected, or select tool error
-                pass # handled as a default error
+                if self.raise_on_error: # fuck it
+                    raise # pass # handled as a default error
+                else:
+                    pass
             else:
                 # regular gcmd errors end up in here, for example action_raise_error.
                 self.current_change_id = -1
