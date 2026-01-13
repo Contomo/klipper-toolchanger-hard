@@ -250,13 +250,13 @@ class SensorlessAutoTune:
         self.stall_min = config.getint("stall_min", None)
         self.stall_max = config.getint("stall_max", None)
 
-        self.gcode._register_mux_axis_ci(
+        self._register_mux_axis_ci(
             "SENSORLESS_AUTOTUNE",
             self.cmd_SENSORLESS_AUTOTUNE,
             desc=self.cmd_SENSORLESS_AUTOTUNE_help,
         )
 
-        self.gcode._register_mux_axis_ci(
+        self._register_mux_axis_ci(
             "SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS",
             self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS,
             desc=self.cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help,
