@@ -215,10 +215,24 @@ class ToolsCalibrate:
         start_pos = toolhead.get_position()
         nozzle_z = self.probe_multi_axis.run_probe('z-', gcmd, speed_ratio=0.5)[Axis.Z]
         # now move down with the tool probe
-        probe_session = probe.start_probe_session(gcmd)
-        probe_session.run_probe(gcmd)
-        probe_z = probe_session.pull_probed_results()[0][Axis.Z]
-        probe_session.end_probe_session()
+        def _run_tool_probe_once(): 
+            if hasattr(probe, "start_probe_session"):
+                probe_session = probe.start_probe_session(gcmd)
+                try:
+                    probe_session.run_probe(gcmd)
+                    return probe_session.pull_probed_results()[0][Axis.Z]
+                finally:
+                    probe_session.end_probe_session()
+            # Legacy probe objects (older Klipper) don't expose sessions.
+            return probe.run_probe(gcmd)[Axis.Z]
+
+        try:
+            probe_z = _run_tool_probe_once()
+        except Exception as e: # bouncy ball triggers when dropping
+            if "Probe triggered prior to movement" not in str(e):
+                raise
+            toolhead.dwell(0.500)
+            probe_z = _run_tool_probe_once()
 
         z_offset = probe_z - nozzle_z + self.trigger_to_bottom_z
         self.last_probe_offset = z_offset

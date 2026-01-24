@@ -1,4 +1,9 @@
-DOCK_TUNER is an alternative to the tool align provided at the bottom of the toolchanger.cfg  
+# toolchanger
+right now only the "fixed" dock location is up to date, the others will work but i have not taken the time to adjust/optimize them yet.
+
+
+# DOCK_TUNER
+its an alternative to the tool align provided at the bottom of the toolchanger.cfg  
   
 <img src="../../../media/dock_tuner.png" alt="Dock tuner" height="500">
 
