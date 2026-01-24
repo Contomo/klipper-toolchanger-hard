@@ -41,17 +41,14 @@ bash ~/klipper-toolchanger/install.sh
 
 ## Migrating from KTC-Easy to KTC-H
 
-Uninstall KTC-E
+Uninstall KTC-E and install KTC-H
 ```commandline
 sudo rm -r ~/klipper-toolchanger-easy
-```
-
-Install KTC-H
-```commandline
 wget -O - https://raw.githubusercontent.com/Contomo/klipper-toolchanger-hard/main/install.sh | bash
 ```
 
-In Mainsail, delete everything in the toolchanger folder. Don't delete any Tool configs and toolchanger-config.cfg if those happen to be in here.
+
+In Mainsail, delete everything in the toolchanger folder. Don't delete any Tool configs and toolchanger-config.cfg if those happen to be in here.   
 Restore the readonly-configs from the KTC-E GitHub by putting them in the toolchanger folder. 
 You can find them here:
 ```commandline
@@ -63,7 +60,7 @@ https://github.com/jwellman80/klipper-toolchanger-easy/tree/main/examples/easy-a
 ```
 
 Set up your files like so:
-
+```commandline
 ├── toolchanger/
 │   ├── homing.cfg				 	 # from easy-additions folder
 │   ├── tool_detection.cfg     	 # for TAP install
@@ -77,7 +74,7 @@ Set up your files like so:
 │   └── T1.cfg
 └── toolchanger-config.cfg		 # User-editable overrides
 └── printer.cfg      				 # your other CFGs are also here 
-
+```
 
 
 Edit the toolchanger-include.cfg to include your tools, for example: 
@@ -100,3 +97,5 @@ TO:
 ```
 
 In tool_detection.cfg, comment out the macros INITIALIZE_TOOLCHANGER, _INITIALIZE_FROM_DETECTED_TOOL, _INITIALIZE_FROM_DETECTED_TOOL_IMPL, VERIFY_TOOL_DETECTED
+
+All done! :)
