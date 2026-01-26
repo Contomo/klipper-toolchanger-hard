@@ -3,6 +3,7 @@
 # Copyright (C) 2023 Viesturs Zarins <viesturz@gmail.com>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import inspect
 from . import probe
 
 if not all(hasattr(probe, attr) for attr in (
@@ -33,8 +34,14 @@ class ToolProbeEndstop:
         self.crash_detection_active = False
         self.crash_lasttime = 0.
         self.mcu_probe = EndstopRouter(self.printer)
+        self.probe_offsets = probe.ProbeOffsetsHelper(config)
         self.param_helper = probe.ProbeParameterHelper(config)
-        self.homing_helper = probe.HomingViaProbeHelper(config, self.mcu_probe, self.param_helper)
+
+        _hh_args = (config, self.mcu_probe, self.probe_offsets, self.param_helper)
+        if len(inspect.signature(probe.HomingViaProbeHelper.__init__).parameters) < 5:
+            _hh_args = _hh_args[:3]
+        self.homing_helper = probe.HomingViaProbeHelper(*_hh_args)
+        
         self.probe_session = probe.ProbeSessionHelper(config, self.param_helper, self.homing_helper.start_probe_session)
         self.cmd_helper = probe.ProbeCommandHelper(config, self, self.mcu_probe.query_endstop)
         self._active_session = None
@@ -63,7 +70,7 @@ class ToolProbeEndstop:
         self.toolhead = self.printer.lookup_object('toolhead')
         self._detect_active_tool()
 
-    def get_offsets(self):
+    def get_offsets(self, gcmd=None):
         if self.active_probe:
             return self.active_probe.get_offsets()
         return 0.0, 0.0, 0.0
@@ -134,6 +141,7 @@ class ToolProbeEndstop:
             self.mcu_probe.set_active_mcu(None)
             self.active_tool_number = -1
             self.cmd_helper.name = self.name
+        self.probe_offsets.x_offset, self.probe_offsets.y_offset, self.probe_offsets.z_offset = self.get_offsets()
         self._active_session = None
 
     def _query_open_tools(self, tool_number=None):

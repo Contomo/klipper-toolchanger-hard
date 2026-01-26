@@ -392,10 +392,15 @@ def _homing_via_probe_helper_factory(probe_mod, pins_mod):
     LookupZSteppers = probe_mod.LookupZSteppers
 
     class HomingViaProbeHelper:
-        def __init__(self, config, mcu_probe, param_helper):
+        def __init__(self, config, mcu_probe, probe_offsets_or_param, param_helper=None):
             self.printer = config.get_printer()
             self.mcu_probe = mcu_probe
-            self.param_helper = param_helper
+            if param_helper is None:
+                self.probe_offsets = None
+                self.param_helper = probe_offsets_or_param
+            else:
+                self.probe_offsets = probe_offsets_or_param
+                self.param_helper = param_helper
             self.multi_probe_pending = False
             self.z_min_position = lookup_minimum_z(config)
             self.results = []

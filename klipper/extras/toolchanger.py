@@ -33,6 +33,7 @@ class GCodeSuspendHelper:
         self._drop_current_buffer = False # just allows us to decide to discard while True
         self._is_patched = False
         self._pause_triggered = False
+        self._process_depth = 0
 
         self.respond_to_console = (config.get('gcode_suspend_respond', 'log') == 'console')
         
@@ -52,31 +53,38 @@ class GCodeSuspendHelper:
         orig_process_commands = self.gcode._process_commands
 
         def patched_process_commands(gcode_self, commands, need_ack=True):
-            # We iterate manually to allow splitting the buffer upon error
-            for i, line in enumerate(commands):
-                try:
-                    # Pass single line. Pass need_ack EXACTLY as received.
-                    orig_process_commands([line], need_ack=need_ack)
-                
-                except self.gcode.error as e:
-                    # Catch exceptions that were NOT swallowed by Klipper (need_ack=False)
-                    if isinstance(e, self.ToolchangePause): # this prob very destructive →  or self._pause_triggered:
-                         self._handle_pause(commands, i, e)
-                         return
-                    raise e
-                
-                except Exception:
-                    raise
+            self._process_depth += 1
+            try:
+                # We iterate manually to allow splitting the buffer upon error
+                for i, line in enumerate(commands):
+                    try:
+                        # Pass single line. Pass need_ack EXACTLY as received.
+                        orig_process_commands([line], need_ack=need_ack)
+                    
+                    except self.gcode.error as e:
+                        # Catch exceptions that were NOT swallowed by Klipper (need_ack=False)
+                        if isinstance(e, self.ToolchangePause): # this prob very destructive →  or self._pause_triggered:
+                             self._handle_pause(commands, i, e)
+                             return
+                        raise e
+                    
+                    except Exception:
+                        raise
 
-                # Check if pause was triggered but swallowed by Klipper (need_ack=True)
-                if self._pause_triggered:
-                    self._handle_pause(commands, i, self.ToolchangePause("Toolchange Pause Triggered"))
-                    return
+                    # Check if pause was triggered but swallowed by Klipper (need_ack=True)
+                    if self._pause_triggered:
+                        self._handle_pause(commands, i, self.ToolchangePause("Toolchange Pause Triggered"))
+                        return
+            finally:
+                self._process_depth -= 1
 
         self.gcode._process_commands = types.MethodType(patched_process_commands, self.gcode)
         self._is_patched = True
 
     def _handle_pause(self, commands, current_index, exception_obj):
+        if self._process_depth > 1:
+            # We're inside a nested macro/command buffer; bubble to outermost.
+            raise exception_obj
         if self._drop_current_buffer:
             # We are inside the failed template. We must abort this loop.
             # We raise the exception so it bubbles up to select_tool.
@@ -86,8 +94,7 @@ class GCodeSuspendHelper:
             remaining = commands[current_index+1:]
             if remaining:
                 self.stashed_commands.extend(remaining)
-                self._log("Toolchanger: Stashed %d commands." % len(remaining))
-            
+                self._log(f"<details><summary>Toolchanger: Stashed {len(remaining)} commands.</summary>{'<br>'.join(self.stashed_commands)}</details>")
             # Reset triggers since we handled it
             self._pause_triggered = False
             self._log("Toolchanger: Execution suspended cleanly.")
@@ -771,7 +778,7 @@ class Toolchanger:
             return
         else:
             # poll until detected, or 0.5 s after true motion end passes
-            poll_s, timeout_s = 0.001, 0.5
+            poll_s, timeout_s = 0.0025, 0.5
             anchor_pt = toolhead.get_last_move_time() + _kin_flush_delay()  # print_time anchor
             eventtime = reactor.monotonic()
             deadline  = None  # reactor-time deadline set once MCU crosses anchor

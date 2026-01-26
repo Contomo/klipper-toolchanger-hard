@@ -23,6 +23,19 @@ def _probe_accepts_mcu_probe() -> bool:
     return len(params) >= 3
 
 
+def _build_homing_helper(config, mcu_probe, probe_offsets, param_helper):
+    try:
+        sig = inspect.signature(probe.HomingViaProbeHelper.__init__)
+        params = list(sig.parameters.values())
+        if len(params) >= 5:
+            return probe.HomingViaProbeHelper(
+                config, mcu_probe, probe_offsets, param_helper
+            )
+    except Exception:
+        pass
+    return probe.HomingViaProbeHelper(config, mcu_probe, param_helper)
+
+
 def _has_probe_helpers() -> bool:
     return all( hasattr(probe, n) for n in (
         "ProbeCommandHelper", "ProbeOffsetsHelper",
@@ -30,6 +43,7 @@ def _has_probe_helpers() -> bool:
         "ProbeSessionHelper",
         )
     )
+
 
 
 class _ParamHelperProxy:
@@ -57,16 +71,29 @@ class _UpstreamProbeImpl:
             config, self, self.mcu_probe.query_endstop
         )
         self.probe_offsets = probe.ProbeOffsetsHelper(config)
+        params = inspect.signature(self.probe_offsets.get_offsets).parameters
+        self._offsets_accepts_gcmd = (
+            ("gcmd" in params)
+            or any(p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD) for p in params.values())
+        )
         self.param_helper = param_helper if param_helper is not None else probe.ProbeParameterHelper(config)
-        self.homing_helper = probe.HomingViaProbeHelper(
-            config, self.mcu_probe, self.param_helper
+        self.homing_helper = _build_homing_helper(
+            config, self.mcu_probe, self.probe_offsets, self.param_helper
         )
         self.probe_session = probe.ProbeSessionHelper(
-            config, self.param_helper, self.homing_helper
+            config, self.param_helper, self.homing_helper.start_probe_session
         )
 
     def get_probe_params(self, gcmd=None):
         return self.param_helper.get_probe_params(gcmd)
+
+    def get_offsets(self, gcmd=None):
+        if self._offsets_accepts_gcmd:
+            return self.probe_offsets.get_offsets(gcmd)
+        return self.probe_offsets.get_offsets()
+
+    def get_status(self, eventtime):
+        return self.cmd_helper.get_status(eventtime)
 
     def start_probe_session(self, gcmd):
         return self.probe_session.start_probe_session(gcmd)
@@ -258,6 +285,11 @@ class ProbeMultiplexer:
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name()
         self.toolhead = None
+
+        if not config.fileconfig.has_section(self.name):
+            config.fileconfig.add_section(self.name)
+        if not config.fileconfig.has_option(self.name, "z_offset"):
+            config.fileconfig.set(self.name, "z_offset", "0.0")
 
         self.probes_by_name: Dict[str, MuxProbe] = {}
         self.probes_by_number: Dict[int, MuxProbe] = {}

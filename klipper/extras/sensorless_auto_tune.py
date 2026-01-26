@@ -529,9 +529,7 @@ class SensorlessAutoTune:
         gcmd.respond_info("\n".join(lines))
 
 
-    cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help = """
-    Home both directions from the same start position to estimate span
-    """
+    cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS_help = """Home both directions from the same start position to estimate span"""
     def cmd_SENSORLESS_AUTOTUNE_FIND_CONSTRAINTS(self, gcmd):
         margin = gcmd.get_float("MARGIN", 0.1, minval=0.0)
 
@@ -622,7 +620,6 @@ class SensorlessAutoTune:
             self.toolhead.set_position(pos0)
 
             _restore_limits_to_entry()
-
 
     @contextmanager
     def _temporary_home_current(self, current: Optional[float]) -> Iterator[None]:
