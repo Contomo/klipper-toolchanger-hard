@@ -26,6 +26,8 @@ class ToolProbeEndstop:
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name()
+        if not config.fileconfig.has_option(self.name, "z_offset"):
+            config.fileconfig.set(self.name, "z_offset", "0.0")
         self.tool_probes = {}
         self.last_query = {} # map from tool number to endstop state
         self.active_probe = None
@@ -37,10 +39,9 @@ class ToolProbeEndstop:
         self.probe_offsets = probe.ProbeOffsetsHelper(config)
         self.param_helper = probe.ProbeParameterHelper(config)
 
-        _hh_args = (config, self.mcu_probe, self.probe_offsets, self.param_helper)
-        if len(inspect.signature(probe.HomingViaProbeHelper.__init__).parameters) < 5:
-            _hh_args = _hh_args[:3]
-        self.homing_helper = probe.HomingViaProbeHelper(*_hh_args)
+        self.homing_helper = self._build_homing_helper(
+            config, self.mcu_probe, self.probe_offsets, self.param_helper
+        )
         
         self.probe_session = probe.ProbeSessionHelper(config, self.param_helper, self.homing_helper.start_probe_session)
         self.cmd_helper = probe.ProbeCommandHelper(config, self, self.mcu_probe.query_endstop)
@@ -65,6 +66,18 @@ class ToolProbeEndstop:
                                     desc=self.cmd_START_TOOL_PROBE_CRASH_DETECTION_help)
         self.gcode.register_command('STOP_TOOL_PROBE_CRASH_DETECTION', self.cmd_STOP_TOOL_PROBE_CRASH_DETECTION,
                                     desc=self.cmd_STOP_TOOL_PROBE_CRASH_DETECTION_help)
+
+    def _build_homing_helper(self, config, mcu_probe, probe_offsets, param_helper):
+        try:
+            sig = inspect.signature(probe.HomingViaProbeHelper.__init__)
+            params = list(sig.parameters.values())
+            if len(params) >= 5:
+                return probe.HomingViaProbeHelper(
+                    config, mcu_probe, probe_offsets, param_helper
+                )
+        except Exception:
+            pass
+        return probe.HomingViaProbeHelper(config, mcu_probe, param_helper)
 
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -108,7 +121,15 @@ class ToolProbeEndstop:
             self._active_session = self.active_probe.start_probe_session(gcmd)
         return self._active_session
 
-    def run_probe(self, gcmd):
+    def run_probe(self, gcmd, retry_session=None):
+        if self.active_probe and hasattr(self.active_probe, "run_probe"):
+            try:
+                sig = inspect.signature(self.active_probe.run_probe)
+                if len(sig.parameters) >= 3:
+                    return self.active_probe.run_probe(gcmd, retry_session)
+            except Exception:
+                pass
+            return self.active_probe.run_probe(gcmd)
         session = self._get_session(gcmd)
         session.run_probe(gcmd)
         results = session.pull_probed_results()

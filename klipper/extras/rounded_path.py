@@ -11,6 +11,7 @@
 
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
+import logging
 EPSILON = 0.001
 EPSILON_ANGLE = 0.001
 
@@ -92,9 +93,11 @@ class RoundedPath:
     buffer: list[ControlPoint]
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.mm_per_arc_segment = config.getfloat('resolution', 1., above=0.0)
-        self.algorithm          = config.getchoice('algorithm', self._ALGO_MAP, 'bezier')
-        self.reset_on_mismatch  = config.getboolean('reset_on_mismatch', True)
+        self.mm_per_arc_segment   = config.getfloat('resolution', 1.0, above=0.0)
+        self.angle_resolution_deg = config.getfloat('angle_resolution', 1.0, above=0.0, maxval=180.0)
+        self.log                  = config.getboolean('logging', False)
+        self.algorithm            = config.getchoice('algorithm', self._ALGO_MAP, 'bezier')
+        self.reset_on_mismatch    = config.getboolean('reset_on_mismatch', True)
         if self.algorithm == 'bezier' and np is None:
             raise config.error("Choice 'bezier' for option 'algorithm' in section 'rounded_path' requires 'numpy' to be installed." \
                                 "(install numpy or switch to fillet)")
@@ -236,10 +239,25 @@ class RoundedPath:
 
     def _arc_fillet(self, c: ControlPoint, p: ControlPoint, n: ControlPoint):
         radius = c.lin_d * c.lin_d_to_r
-        num_segments = math.floor(radius * c.angle / self.mm_per_arc_segment)
-        if num_segments < 1:
+        angle = abs(c.angle)
+        if angle <= EPSILON or radius <= EPSILON:
             self._g0(c)
             return
+        path_length = radius * angle
+        angle_step = math.radians(self.angle_resolution_deg)
+        angle_segments = max(1, math.ceil(angle / angle_step))
+        max_length_segments = max(1, math.floor(path_length / self.mm_per_arc_segment))
+        if angle_segments <= max_length_segments:
+            num_segments = angle_segments
+        else:
+            num_segments = max_length_segments
+        if self.log:
+            logging.info(
+                "rounded_path fillet: angle=%.3fdeg radius=%.4f mm segments=%d "
+                "(angle_segments=%d length_limit=%d)",
+                math.degrees(angle), radius, num_segments,
+                angle_segments, max_length_segments,
+            )
         vp = _vnorm(_vecto(c, p))
         vn = _vnorm(_vecto(c, n))
         rotaxis = _vnorm(_cross(vp, vn))
@@ -259,10 +277,18 @@ class RoundedPath:
         if np is None:
             raise RuntimeError("NumPy is required for bezier algorithm")
         radius = c.lin_d * c.lin_d_to_r
-        num_segments = math.floor(radius * c.angle / self.mm_per_arc_segment)
-        if num_segments < 1:
+        angle = abs(c.angle)
+        if angle <= EPSILON or radius <= EPSILON:
             self._g0(c)
             return
+        path_length = radius * angle
+        angle_step = math.radians(self.angle_resolution_deg)
+        angle_segments = max(1, math.ceil(angle / angle_step))
+        max_length_segments = max(1, math.floor(path_length / self.mm_per_arc_segment))
+        if angle_segments <= max_length_segments:
+            num_segments = angle_segments
+        else:
+            num_segments = max_length_segments
         vp = _vnorm(_vecto(c, p))
         vn = _vnorm(_vecto(c, n))
         rotaxis = _vnorm(_cross(vp, vn))
@@ -276,7 +302,16 @@ class RoundedPath:
         np_p = np.array(vp) * c.lin_d  # previous tangential point (vector from c)
         np_c = np.array(c.vec)         # corner itself
         straight_len = math.hypot(*(np_n - np_p))
-        n_pts = max(2, math.trunc(straight_len / self.mm_per_arc_segment))
+        straight_segments = max(1, math.floor(straight_len / self.mm_per_arc_segment))
+        if self.log:
+            logging.info(
+                "rounded_path bezier: angle=%.3fdeg radius=%.4f mm segments=%d "
+                "(angle_segments=%d length_limit=%d straight_limit=%d)",
+                math.degrees(angle), radius, num_segments,
+                angle_segments, max_length_segments, straight_segments,
+            )
+        # Cap bezier sampling to the chosen segment count to avoid excessive points
+        n_pts = max(2, num_segments + 1)
         bcurve = _Bezier.bezier_curve([np_p + np_c, np_c, np_n + np_c], n=n_pts)
 
         # Emit: first move to entry tangent, then follow Bezier in reverse so
