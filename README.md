@@ -41,6 +41,8 @@ bash ~/klipper-toolchanger/install.sh
 
 ## Migrating from KTC-Easy to KTC-H
 
+Download & Save a backup of your current configuration.   
+
 Uninstall KTC-E and install KTC-H.  
 ```commandline
 sudo rm -r ~/klipper-toolchanger-easy
