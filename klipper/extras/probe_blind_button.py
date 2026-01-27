@@ -17,6 +17,7 @@ class ProbeBlindButton:
 
         self.toolhead         = None
         self._probe_session   = None
+        self._probe_obj       = None
 
         self._busy            = 0
         self._latched         = False
@@ -36,12 +37,28 @@ class ProbeBlindButton:
 
     def _on_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
-        prb = self.printer.lookup_object('probe', None)
-        self._probe_session = getattr(prb, 'probe_session', None) if prb else None
+        self._probe_obj = self.printer.lookup_object('probe', None)
+        self._probe_session = getattr(self._probe_obj, 'probe_session', None) if self._probe_obj else None
 
     def _session_busy(self):
         ps = self._probe_session
-        return bool(ps and getattr(ps, 'hw_probe_session', None))
+        if ps and getattr(ps, 'hw_probe_session', None):
+            return True
+        prb = self._probe_obj
+        if not prb:
+            return False
+        if getattr(prb, 'multi_probe_pending', False):
+            return True
+        active = getattr(prb, 'active_probe', None)
+        if active is not None:
+            aps = getattr(active, 'probe_session', None)
+            if aps and getattr(aps, 'multi_probe_pending', False):
+                return True
+            if aps and getattr(aps, 'hw_probe_session', None):
+                return True
+        if getattr(prb, '_active_session', None) is not None:
+            return True
+        return False
 
     @staticmethod
     def _is_probe_endstop_listed(hmove):
