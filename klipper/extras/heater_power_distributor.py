@@ -280,7 +280,7 @@ class HeaterPowerDistributor:
             integ_max = max(0.0, limit_val) / ki
             if integ < 0.0 or integ > integ_max:
                 control.prev_temp_integ = clamp(integ, 0.0, integ_max)
-        except Exception:
+        except Exception as exc:
             logging.debug(
                 "HeaterDistributor '%s': Skipping PID integral clamp for '%s': %s",
                 self.name, ctx.name, repr(exc)

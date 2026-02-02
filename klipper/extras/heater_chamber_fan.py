@@ -3,7 +3,7 @@ import logging
 from . import fan
 from .heaters import ControlPID, ControlBangBang
 
-PIN_MIN_TIME = fan.FAN_MIN_TIME
+PIN_MIN_TIME = getattr(fan, 'FAN_MIN_TIME', 0.100)
 
 
 class _FanConfigProxy:
