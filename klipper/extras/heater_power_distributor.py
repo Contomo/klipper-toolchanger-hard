@@ -166,14 +166,19 @@ class HeaterPowerDistributor:
 
         # Power Model
         model_name = config.getchoice('model', list(BUILTIN_MODELS) + ['custom'], default='none')
-        rated_powers = config.getfloatlist('powers', (DEFAULT_WATT,))
-
-        if len(rated_powers) == 1:
-            self.rated_watts_map = {h: rated_powers[0] for h in self.heater_names}
-        elif len(rated_powers) == len(self.heater_names):
-            self.rated_watts_map = {h: p for h, p in zip(self.heater_names, rated_powers)}
+        self.powers_option_set = config.fileconfig.has_option(config.section, 'powers')
+        if self.powers_option_set:
+            rated_powers = config.getfloatlist('powers', (DEFAULT_WATT,))
+            if len(rated_powers) == 1:
+                self.rated_watts_map = {h: rated_powers[0] for h in self.heater_names}
+            elif len(rated_powers) == len(self.heater_names):
+                self.rated_watts_map = {h: p for h, p in zip(self.heater_names, rated_powers)}
+            else:
+                raise config.error(
+                    f"HeaterDistributor: 'powers' length ({len(rated_powers)}) must match heaters ({len(self.heater_names)})"
+                )
         else:
-            raise config.error(f"HeaterDistributor: 'powers' length ({len(rated_powers)}) must match heaters ({len(self.heater_names)})")
+            self.rated_watts_map = {h: DEFAULT_WATT for h in self.heater_names}
 
         if model_name == 'custom':
             pairs = config.getlists('model_points', seps=(',', '\n'), count=2, parser=float)
@@ -197,15 +202,20 @@ class HeaterPowerDistributor:
         )
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
 
+
     def _handle_ready(self):
         reactor = self.printer.get_reactor()
         now = reactor.monotonic()
         for name in self.heater_names:
             h_obj = self.pheaters.lookup_heater(name)
+            rated_watt = float(self.rated_watts_map.get(name, DEFAULT_WATT))
+            if not self.powers_option_set:
+                rated_watt = self._get_mpc_rated_watts(h_obj, rated_watt)
+                self.rated_watts_map[name] = rated_watt
             self.heaters[name] = HeaterContext(
                 name=name,
                 heater=h_obj,
-                rated_watt=float(self.rated_watts_map[name])
+                rated_watt=rated_watt
             )
             self.heaters[name].update_control_type()
             
@@ -221,19 +231,37 @@ class HeaterPowerDistributor:
         reactor.register_timer(self._update_loop, reactor.monotonic() + self.poll_interval)
         logging.info(f"HeaterDistributor '{self.name}': Budget={self.total_budget_watts}W, Heaters={list(self.heaters.keys())}")
 
+
+    def _get_mpc_rated_watts(self, heater_obj, fallback):
+        control = getattr(heater_obj, 'control', None)
+        if control is None or getattr(control, 'get_type', lambda: None)() != 'mpc':
+            return fallback
+        for getter in (
+            lambda: control.get_profile().get('heater_power'),
+            lambda: getattr(control, 'const_heater_power', None),
+        ):
+            try:
+                val = float(getter())
+            except Exception:
+                continue
+            if val and val > 0.0:
+                return val
+        return fallback
+
+
     def cmd_SET_HEATER_DISTRIBUTOR(self, gcmd):
         new_budget = gcmd.get_float('POWER', above=0.0)
         self.total_budget_watts = new_budget
         gcmd.respond_info(f"{self.name}: Budget set to {self.total_budget_watts:.1f} W")
 
+
     def _get_active_extruder(self, eventtime):
-        th = self.printer.lookup_object('toolhead', None)
-        if th:
-            try:
-                return th.get_status(eventtime).get('extruder')
-            except Exception:
-                pass
-        return None
+        try:
+            toolhead = self.printer.lookup_object('toolhead')
+            return toolhead.get_status(eventtime).get('extruder')
+        except Exception:
+            return None
+    
 
     def _water_fill(self, demands: Dict[str, float], capacities: Dict[str, float], total_budget: float) -> Dict[str, float]:
         allocations = {n: 0.0 for n in demands}
