@@ -19,6 +19,7 @@ Add the [macros.cfg](/macros.cfg) to your printer config.
 
 ## Changelog
 
+* 2026.02.05 - planned obsolescence of tool_probe_endstop
 * 2025.12.26 - **Breaking change** Stop using G-code offsets for tool offsets. Uses a dedicated gcode transform instead. Hopefully making the code more robust.
 * 2025.12.25 - Use Bezier curves for rounded paths.
 * 2025.12.25 - Manual rail update to latest Klipper.
@@ -36,6 +37,7 @@ bash ~/klipper-toolchanger/install.sh
 
 * [Toolchanger](docs/toolchanger.md) - tool management support.
 * [Tool probe](docs/tool_probe.md) - per tool Z probe.
+* [Probe multiplexer](docs/probe_multiplexer.md) - route multiple probes through one logical probe.
 * [Rounded path](docs/rounded_path.md) - rounds the travel path corners for fast non-print moves.
 * [Tools calibrate](docs/tools_calibrate.md) - support for contact based XYZ offset calibration probes.
 

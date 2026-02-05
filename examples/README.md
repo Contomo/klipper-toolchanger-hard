@@ -4,6 +4,11 @@ The examples here are for specific toolchanger setups, and will likely need to b
 They are all for setups with multiple physical tools.  
 The extension code supports arbitrary tool setups, but this has been the most prolific use by far.
 
+## Important note
+
+For kalico and future klipper usage, i plan on deprecating tool_probe_endstop, the general plan is that toolchanger handles tool detection, this makes configs easier, setups cleaner, and the divergency between setups exponentially smaller.
+
+
 ## Klipper Setup 
 
 Each setup is a combination of 3 parts:  
@@ -45,7 +50,7 @@ Each setup is a combination of 3 parts:
 
   Config where each tool has a separate Z probe, used for both tool detection and homing/probing.  
   This is more versatile but can result in more calibration as you now need to calibrate all tool probes (or do it automatically).
-  
+  (note that not all tool probes need to be calibrated if you dont intend to home will all tool probes :P)
   Suitable for flying or fixed gantry printers like Voron 2.4.
 
 ---

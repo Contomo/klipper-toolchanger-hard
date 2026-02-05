@@ -296,7 +296,6 @@ class ProbeMultiplexer:
         self.probe_names: List[str] = []
         self.probe_numbers: List[int] = []
 
-        self.last_query: Dict[str, int] = {}
         self.active_probe: Optional[MuxProbe] = None
         self.active_name: Optional[str] = None
 
@@ -472,7 +471,6 @@ class ProbeMultiplexer:
             "z_offset": active_z,
             "probe_numbers": list(self.probe_numbers),
             "probe_names": list(self.probe_names),
-            "last_probes_query": dict(self.last_query),
         }
         return status
 

@@ -40,6 +40,7 @@ Any parameter that can be set on a tool can also be set here and becomes the def
 initialize_on: <manual|home|first-use>    # default: first-use
 initialize_gcode: <template>
 verify_tool_pickup: <True|False>          # default: True
+ignore_detect_probing_events: <True|False>  # default: True
 require_tool_present: <True|False>        # default: False
 uses_axis: <xyz>                          # default: xyz
 on_axis_not_homed: <abort|home>           # default: abort

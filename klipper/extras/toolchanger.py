@@ -150,6 +150,8 @@ class Toolchanger:
         self.initialize_on = config.getchoice(
             'initialize_on', init_options, 'first-use')
         self.verify_tool_pickup = config.getboolean('verify_tool_pickup', True)
+        self.ignore_detect_probing_events = config.getboolean(
+            'ignore_detect_probing_events', True)
         self.require_tool_present = config.getboolean('require_tool_present', False)
         self.transfer_fan_speed = config.getboolean('transfer_fan_speed', True)
         self.perform_restore_move = config.getboolean('perform_restore_move', True)
@@ -680,10 +682,13 @@ class Toolchanger:
             self.gcode.respond_info("Multiple tools detected: %s" % (detected_names,))
             detected = None
 
-        self.detected_tool = detected
+        if not self.ignore_detect_probing_events:
+            self.detected_tool = detected
         self._det_btn.note_change(detected)
 
     def _on_probe_blinded_change(self, last, new):
+        if self.ignore_detect_probing_events:
+            self.detected_tool = new
         if self.status in (STATUS_CHANGING, STATUS_INITIALIZING):
             return
         if new:
