@@ -328,7 +328,8 @@ def parse_gcode_data(path, z_req, tol=GCODE_EPS, max_layer_height=1.0):
                     cur_seg = []
         else:
             if seen_layer and curr.z > z_exit:
-                break
+                if (curr.e - last.e) > 0:
+                    break
             if cur_seg:
                 segments.append(cur_seg)
                 cur_seg = []
