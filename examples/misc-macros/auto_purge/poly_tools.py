@@ -3,7 +3,7 @@ from collections import namedtuple
 import math
 import numpy as np
 from scipy import ndimage
-from scipy.spatial import ConvexHull
+from scipy.spatial import ConvexHull, Delaunay
 from typing import Iterable, List, Sequence, Tuple, Dict, Any, Optional
 try:
     import cv2
@@ -19,6 +19,130 @@ GCODE_EPS = 1e-4
 RE_PARAMS = re.compile(r"([A-Z])([-+]?(?:\d*\.\d+|\d+))")
 RE_Z = re.compile(r"Z([-+]?(?:\d*\.\d+|\d+))")
 Point = namedtuple('Point', 'x y z e')
+
+
+def _next_pos(cur: Point, params: Dict[str, float], abs_pos: bool, abs_ext: bool) -> Point:
+    """
+    cur=Point, params=dict, abs_pos=bool, abs_ext=bool  →  Point
+    Computes next position from params and current state.
+    """
+    nx = (params['X'] if abs_pos else cur.x + params['X']) if 'X' in params else cur.x
+    ny = (params['Y'] if abs_pos else cur.y + params['Y']) if 'Y' in params else cur.y
+    nz = (params['Z'] if abs_pos else cur.z + params['Z']) if 'Z' in params else cur.z
+
+    ne = cur.e
+    if 'E' in params:
+        if abs_ext:
+            ne = params['E']
+        else:
+            ne += params['E']
+
+    return Point(nx, ny, nz, ne)
+
+
+def _sweep_delta(a0: float, a1: float, cw: bool) -> float:
+    """
+    a0=float, a1=float, cw=bool  →  float
+    Returns positive sweep angle from a0 to a1 in cw/ccw direction.
+    """
+    if cw:
+        d = a0 - a1
+        if d <= 0:
+            d += 2.0 * math.pi
+    else:
+        d = a1 - a0
+        if d <= 0:
+            d += 2.0 * math.pi
+    return d
+
+
+def _arc_center_from_r(cur: Point, target: Point, r: float, cw: bool) -> Optional[Tuple[float, float]]:
+    """
+    cur=Point, target=Point, r=float, cw=bool  →  (float,float)|None
+    Resolves center from R.
+    """
+    dx = target.x - cur.x
+    dy = target.y - cur.y
+    chord = math.hypot(dx, dy)
+    r_abs = abs(r)
+    if chord <= 1e-9 or chord > 2.0 * r_abs + 1e-9:
+        return None
+
+    mx = (cur.x + target.x) * 0.5
+    my = (cur.y + target.y) * 0.5
+    h = math.sqrt(max(r_abs * r_abs - (chord * 0.5) ** 2, 0.0))
+    px = -dy / chord
+    py = dx / chord
+    c1 = (mx + px * h, my + py * h)
+    c2 = (mx - px * h, my - py * h)
+
+    def _sweep(center):
+        a0 = math.atan2(cur.y - center[1], cur.x - center[0])
+        a1 = math.atan2(target.y - center[1], target.x - center[0])
+        return _sweep_delta(a0, a1, cw)
+
+    d1 = _sweep(c1)
+    d2 = _sweep(c2)
+    want_large = (r < 0.0)
+    if (d1 > math.pi) == want_large and (d2 > math.pi) != want_large:
+        return c1
+    if (d2 > math.pi) == want_large and (d1 > math.pi) != want_large:
+        return c2
+    return c1 if d1 >= d2 else c2
+
+
+def _arc_center(cur: Point, target: Point, params: Dict[str, float], cw: bool) -> Optional[Tuple[float, float]]:
+    """
+    cur=Point, target=Point, params=dict, cw=bool  →  (float,float)|None
+    Resolves arc center from I/J or R.
+    """
+    if 'I' in params or 'J' in params:
+        return (cur.x + params.get('I', 0.0), cur.y + params.get('J', 0.0))
+    if 'R' in params:
+        return _arc_center_from_r(cur, target, float(params['R']), cw)
+    return None
+
+
+def _iter_arc_points(cur: Point,
+                     target: Point,
+                     center: Optional[Tuple[float, float]],
+                     cw: bool,
+                     max_seg_len: float = 1.0,
+                     max_angle_deg: float = 10.0) -> Iterable[Point]:
+    """
+    cur=Point, target=Point, center=(float,float)|None, cw=bool,
+    max_seg_len=float, max_angle_deg=float  →  iterator(Point)
+    Yields Points along an arc from cur to target (inclusive).
+    """
+    if center is None:
+        yield target
+        return
+
+    cx, cy = center
+    r = math.hypot(cur.x - cx, cur.y - cy)
+    if r < 1e-9:
+        yield target
+        return
+
+    a0 = math.atan2(cur.y - cy, cur.x - cx)
+    a1 = math.atan2(target.y - cy, target.x - cx)
+    delta = _sweep_delta(a0, a1, cw)
+    direction = -1.0 if cw else 1.0
+
+    arc_len = abs(delta) * r
+    max_angle = math.radians(max_angle_deg)
+    n_len = int(math.ceil(arc_len / max_seg_len)) if arc_len > 0 else 1
+    n_ang = int(math.ceil(abs(delta) / max_angle)) if abs(delta) > 0 else 1
+    n = max(1, n_len, n_ang)
+
+    for i in range(1, n + 1):
+        frac = i / n
+        ang = a0 + direction * delta * frac
+        x = cx + r * math.cos(ang)
+        y = cy + r * math.sin(ang)
+        z = cur.z + (target.z - cur.z) * frac
+        e = cur.e + (target.e - cur.e) * frac
+        yield Point(x, y, z, e)
 
 
 def _ensure_path(path):
@@ -109,21 +233,19 @@ def _gcode_state(path, start_offset=0):
                 c2 = line[1]
                 if c2 == '0' or c2 == '1':
                     p = _parse_params(line)
-
-                    nx = (p['X'] if abs_pos else cur.x + p['X']) if 'X' in p else cur.x
-                    ny = (p['Y'] if abs_pos else cur.y + p['Y']) if 'Y' in p else cur.y
-                    nz = (p['Z'] if abs_pos else cur.z + p['Z']) if 'Z' in p else cur.z
-
-                    ne = cur.e
-                    if 'E' in p:
-                        if abs_ext:
-                            ne = p['E']
-                        else:
-                            ne += p['E']
-
-                    nxt = Point(nx, ny, nz, ne)
+                    nxt = _next_pos(cur, p, abs_pos, abs_ext)
                     yield cur, nxt
                     cur = nxt
+
+                elif c2 == '2' or c2 == '3':
+                    # Arc move (G2/G3). Approximate with linear segments.
+                    p = _parse_params(line)
+                    cw = (c2 == '2')
+                    tgt = _next_pos(cur, p, abs_pos, abs_ext)
+                    center = _arc_center(cur, tgt, p, cw)
+                    for pt in _iter_arc_points(cur, tgt, center, cw):
+                        yield cur, pt
+                        cur = pt
 
                 elif c2 == '9':
                     c3 = line[2] if len(line) > 2 else ''
@@ -152,18 +274,17 @@ def _gcode_state(path, start_offset=0):
 def find_first_layer_z(path, threshold=1.0, z_min=0.005, scan_lim=0.6):
     """
     path=str, threshold=float(mm_extruded), z_min=float, scan_lim=float  →  float|None
-    Scans up to scan_lim and returns the first Z with ≥ threshold extrusion.
+    Scans up to scan_lim (while extruding) and returns the first Z with ≥ threshold extrusion.
     """
     z_totals = {}
     valid_layers = set()
 
     for last, curr in _gcode_state(path):
-        if curr.z > scan_lim:
-            break
-
         if curr.z >= z_min:
             de = curr.e - last.e
             if de > 0 and (abs(curr.x - last.x) > GCODE_EPS or abs(curr.y - last.y) > GCODE_EPS):
+                if curr.z > scan_lim:
+                    break
                 zr = round(curr.z, 3)
                 new_tot = z_totals.get(zr, 0.0) + de
                 z_totals[zr] = new_tot
@@ -188,16 +309,15 @@ def parse_gcode_data(path, z_req, tol=GCODE_EPS, max_layer_height=1.0):
     z_exit = z_req + max_layer_height
 
     segments, cur_seg = [], []
+    seen_layer = False
 
     start_offset = 0
     if z_req > 2.0:
         start_offset = _bisect_z_offset(path, z_req)
 
     for last, curr in _gcode_state(path, start_offset=start_offset):
-        if curr.z > z_exit:
-            break
-
         if z_min <= curr.z <= z_max:
+            seen_layer = True
             if (curr.e - last.e) > 0:
                 if not cur_seg:
                     cur_seg.append(last)
@@ -207,6 +327,8 @@ def parse_gcode_data(path, z_req, tol=GCODE_EPS, max_layer_height=1.0):
                     segments.append(cur_seg)
                     cur_seg = []
         else:
+            if seen_layer and curr.z > z_exit:
+                break
             if cur_seg:
                 segments.append(cur_seg)
                 cur_seg = []
@@ -220,6 +342,9 @@ def parse_gcode_data(path, z_req, tol=GCODE_EPS, max_layer_height=1.0):
 # ----------------- BASIC POLYGON / POLYLINE UTILITIES -------------------------------------------------
 
 EPS = 1e-9
+
+Edge = Tuple[int, int]
+Loop = List[int]
 
 
 def ensure_open_np(poly):
@@ -496,6 +621,163 @@ def get_convex_hull(polygons_list):
         return ensure_closed(pts[hull.vertices])
     except Exception:
         return ensure_closed(pts)
+    
+    
+def _edge_key(u: int, v: int) -> Edge:
+    return (u, v) if u < v else (v, u)
+
+
+def _boundary_loops_from_edges(
+    points: np.ndarray,
+    edges: Sequence[Edge],
+    *,
+    eps: float = 1e-12,
+) -> List[Loop]:
+    """points=np.ndarray shape(N,2), edges=[(i,j), ...]  →  [ [i0,i1,...,i0], ... ]
+    Builds closed index loops from undirected boundary edges.
+    """
+    if not edges:
+        return []
+
+    # adjacency (small degree on boundary, so list is fine)
+    adj: Dict[int, List[int]] = {}
+    for a, b in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+
+    used: set[Edge] = set()
+    loops: List[Loop] = []
+
+    for a, b in edges:
+        if _edge_key(a, b) in used:
+            continue
+
+        loop: Loop = [a, b]
+        used.add(_edge_key(a, b))
+
+        prev, curr = a, b
+
+        while True:
+            neigh = adj.get(curr)
+            if not neigh:
+                break
+
+            # Prefer continuing forward: skip going back to prev unless it's the only option.
+            cand = [
+                n for n in neigh
+                if not (_edge_key(curr, n) in used)
+                and not (n == prev and len(neigh) > 1)
+            ]
+
+            if not cand:
+                # if we can close, close
+                if loop[0] in neigh:
+                    loop.append(loop[0])
+                break
+
+            if len(cand) == 1 or prev is None:
+                nxt = cand[0]
+            else:
+                # Choose candidate with maximum dot(v_prev, v_next) => smallest turn / closest to straight
+                v_prev = points[curr] - points[prev]
+                v_prev_len = float(np.linalg.norm(v_prev))
+                if v_prev_len <= eps:
+                    nxt = cand[0]
+                else:
+                    v_prev /= v_prev_len
+                    vecs = points[np.asarray(cand, dtype=int)] - points[curr]
+                    lens = np.linalg.norm(vecs, axis=1)
+
+                    # Guard against degenerate zero-length segments.
+                    valid = lens > eps
+                    if not np.any(valid):
+                        nxt = cand[0]
+                    else:
+                        vecs[valid] /= lens[valid, None]
+                        dots = vecs @ v_prev
+                        # invalid candidates get -inf so they never win
+                        dots[~valid] = -np.inf
+                        nxt = cand[int(np.argmax(dots))]
+
+            used.add(_edge_key(curr, nxt))
+            loop.append(nxt)
+
+            prev, curr = curr, nxt
+            if curr == loop[0]:
+                break
+
+        if len(loop) >= 4 and loop[0] == loop[-1]:
+            loops.append(loop)
+
+    return loops
+
+
+def concave_hull(points: Sequence[Sequence[float]], alpha: float, *, eps: float = 1e-12):
+    """points=[[x,y],...], alpha=float  →  [[x,y],...] (closed)
+    Alpha-shape concave hull using Delaunay triangulation.
+    Smaller alpha yields tighter (more concave) hulls.
+    """
+    pts = np.asarray(points, dtype=float)
+    if pts.size == 0:
+        return []
+
+    pts = np.unique(pts, axis=0)
+    if len(pts) < 4:
+        return ensure_closed(pts)
+
+    # Delaunay can fail on degenerate inputs (collinear, duplicate, etc).
+    # If it fails, fall back to a minimal safe result.
+    try:
+        tri = Delaunay(pts)
+    except (ValueError, RuntimeError):
+        return ensure_closed(pts)
+
+    simplices = tri.simplices
+    if simplices is None or len(simplices) == 0:
+        return ensure_closed(pts)
+
+    pa = pts[simplices[:, 0]]
+    pb = pts[simplices[:, 1]]
+    pc = pts[simplices[:, 2]]
+
+    a = np.linalg.norm(pb - pc, axis=1)
+    b = np.linalg.norm(pa - pc, axis=1)
+    c = np.linalg.norm(pa - pb, axis=1)
+
+    s = 0.5 * (a + b + c)
+    area_sq = np.maximum(s * (s - a) * (s - b) * (s - c), 0.0)
+    area = np.sqrt(area_sq)
+
+    # circumradius R = abc / (4A); handle A≈0 safely
+    radius = (a * b * c) / (4.0 * area + eps)
+
+    keep = radius <= float(alpha)
+    if not np.any(keep):
+        return get_convex_hull(pts)
+
+    # Count triangle edges; boundary edges occur exactly once.
+    counts = Counter()
+    for t in simplices[keep]:
+        u0, u1, u2 = (int(t[0]), int(t[1]), int(t[2]))
+        counts[_edge_key(u0, u1)] += 1
+        counts[_edge_key(u1, u2)] += 1
+        counts[_edge_key(u2, u0)] += 1
+
+    boundary_edges = [e for e, n in counts.items() if n == 1]
+    if not boundary_edges:
+        return get_convex_hull(pts)
+
+    loops = _boundary_loops_from_edges(pts, boundary_edges, eps=eps)
+    if not loops:
+        return get_convex_hull(pts)
+
+    def loop_area(idx_loop: Loop) -> float:
+        poly = ensure_closed(pts[np.asarray(idx_loop, dtype=int)])
+        props = get_polygon_properties(poly)
+        return float(props.get("area", 0.0))
+
+    best_loop = max(loops, key=loop_area)
+    return ensure_closed(pts[np.asarray(best_loop, dtype=int)])
 
 
 def offset_polygon_convex_hull(poly, distance, miter_limit=2.0):
@@ -665,6 +947,7 @@ def offset_polygon(poly, distance, resolution=0.25, padding=2.0, min_area=0.5):
          →  [ [[x,y],...], [[x,y],...], ... ]  (list of polygons)
     SDF-based offset: rasterize → signed distance → contour extraction.
     """
+    poly = ensure_closed(poly)
     expand_pad = padding + max(0, distance)
     grid, origin = rasterize_lines([poly], resolution=resolution, padding=expand_pad)
 
