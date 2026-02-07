@@ -45,10 +45,12 @@ gcode: ; Will recieve all the same parameters handed into print start to use.
 more a sort of toy, but also a purge macro, analyzes your first layer, lays down lines next to the starting position, and purges tools
 
 ### setup
-- add the folder to your config
-- indclude auto_purge/include.cfg
-- make sure you got scipy and numpy installed (you do if you have shaketune) (#TODO install dependencies)
-- edit the path to point to the folder you added (`'lib_path':'~/printer_data/config/toolchanger/auto_purge'`)
+- add the include to your config, ie (replace !!!USERNAME!!! with your username):
+
+```
+[include /home/!!!USERNAME!!!/klipper-toolchanger/examples/misc-macros/auto_purge/include.cfg]
+```
+- make sure you got scipy and numpy installed (and possibly cv-python) (you do if you have shaketune) (#TODO install dependencies)
 - add AUTO_PURGE {rawparams} to your print start where you want to purge
 
 ### what it does
@@ -58,7 +60,10 @@ Spawns a preview SVG to console, purges your tools
 ![image](../../media/auto_purge.png)
 
 ### settings
-theres various settings in auto_purge.cfg right at the top to adjust, such as prime line width etc, tool nozzle size yada yada is inferred from the respective extruder configs.
+If you want to edit settings, copy `[gcode_macro AUTO_PURGE]` with all the `variable_*` into your printer.cfg and make sure it comes **after** the include you added. then edit as you wish.
+
+theres various settings such as prime line width etc, tool nozzle size yada yada is inferred from the respective extruder configs.
+All settings have short comments to elaborate what they do. if youd like to test it first, uncomment `gcode_path` and enter a gcode file name you want to test, then call `AUTO_PURGE` without any parameters to get a preview with all tools of what it *would* purge.
 
 ---
 
