@@ -42,6 +42,8 @@ initialize_gcode: <template>
 verify_tool_pickup: <True|False>          # default: True
 ignore_detect_probing_events: <True|False>  # default: True
 require_tool_present: <True|False>        # default: False
+abort_on_tool_missing: <True|False>       # default: False
+tool_missing_delay: <seconds>             # default: 2.0
 uses_axis: <xyz>                          # default: xyz
 on_axis_not_homed: <abort|home>           # default: abort
 perform_restore_move: <True|False>        # default: True

@@ -90,7 +90,7 @@ class Tool:
     def _handle_detect(self, eventtime, is_triggered):
         _state = self.flip_detect_state ^ is_triggered
         self.detect_state = toolchanger.DETECT_PRESENT if _state else toolchanger.DETECT_ABSENT
-        self.toolchanger.note_detect_change(self)
+        self.toolchanger.note_detect_change(self, eventtime)
         
     # were the cuck here in registering the pin. we know what we want, but we have to check first if someone flipped it.
     # this covers all 4 scenarios automatically, double assigned equal, double assigned equal and not equal, different first, different last.
@@ -142,7 +142,6 @@ class Tool:
                 self.is_disconnected = False
             self.printer.register_event_handler(detect_mcu.get_non_critical_disconnect_event_name(), _on_disc)
             self.printer.register_event_handler(detect_mcu.get_non_critical_reconnect_event_name(),  _on_recon)
-
 
     def get_status(self, eventtime):
         s = {**self.params,
