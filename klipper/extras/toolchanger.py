@@ -679,7 +679,6 @@ class Toolchanger:
                 detected = t
                 detected_names.append(t.name)
         if len(detected_names) > 1:
-            self.gcode.respond_info("Multiple tools detected: %s" % (detected_names,))
             detected = None
 
         if not self.ignore_detect_probing_events:
