@@ -1,6 +1,8 @@
 # rounded paths for fast travel.
 #
-# Copyright (C) 2023  Viesturs Zarins <viesturz@gmail.com>
+# Copyright (C) 2025  Viesturs Zarins <viesturz@gmail.com>
+# Copyright (C) 2025  Ingo Donasch <ingo@donasch.net>
+# Copyright (C) 2026  Eric Billmeyer <eric.billmeyer@freenet.de>
 
 # Aimed to optimize travel paths by minimizing speed changes for sharp corners.
 # Supports arbitrary paths in XYZ.
@@ -12,7 +14,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math
 import logging
-EPSILON = 0.001
+EPSILON = 1e-9
 EPSILON_ANGLE = 0.001
 
 try:
@@ -97,7 +99,6 @@ class RoundedPath:
         self.angle_resolution_deg = config.getfloat('angle_resolution', 1.0, above=0.0, maxval=180.0)
         self.log                  = config.getboolean('logging', False)
         self.algorithm            = config.getchoice('algorithm', self._ALGO_MAP, 'bezier')
-        self.reset_on_mismatch    = config.getboolean('reset_on_mismatch', True)
         if self.algorithm == 'bezier' and np is None:
             raise config.error("Choice 'bezier' for option 'algorithm' in section 'rounded_path' requires 'numpy' to be installed." \
                                 "(install numpy or switch to fillet)")
@@ -134,8 +135,6 @@ class RoundedPath:
         else:
             origin = self.buffer[0].vec
             if _vdist(currentPos, origin) > EPSILON:
-                if self.reset_on_mismatch:
-                    self.buffer.clear()
                 raise gcmd.error("ROUNDED_G0 - current position changed since previous command, the last ROUNDED_G0 before other moves needs to be with D=0")
             last = self.buffer[-1]
             currentPos = last.vec
@@ -195,7 +194,7 @@ class RoundedPath:
         self._deconflict_lin_d(num_segments+1)
 
         for i in range(num_segments):
-            self._arc(self.buffer[i+1], self.buffer[i],self.buffer[i+2])
+            self._arc(self.buffer[i+1], self.buffer[i], self.buffer[i+2])
 
         self.buffer = self.buffer[num_segments:]
         # Update where we finished
@@ -329,6 +328,9 @@ class RoundedPath:
         self._g0p(p, p.vec)
 
     def _g0p(self, p: ControlPoint, vec: list):
+        # ignore extremely short residual misalignements that may collapse lookahead junction velocity on otherwise smooth paths.
+        if self.lastg0 and _vdist(self.lastg0, vec) <= 0.001:
+            return
         self.G0_params["X"]=vec[0]
         self.G0_params["Y"]=vec[1]
         self.G0_params["Z"]=vec[2]
