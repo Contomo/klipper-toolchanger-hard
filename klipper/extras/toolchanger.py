@@ -609,6 +609,7 @@ class Toolchanger:
             self.run_gcode('before_change_gcode', before_change_gcode, extra_context)
             self._set_toolchange_transform()
 
+            self.tool_missing_helper.deactivate()
             if self.active_tool:
                 self.run_gcode('tool.dropoff_gcode',
                                self.active_tool.dropoff_gcode, extra_context)
@@ -619,13 +620,13 @@ class Toolchanger:
                                tool.pickup_gcode, extra_context)
                 if self.has_detection and self.verify_tool_pickup:
                     self.validate_detected_tool(tool, respond_info=gcmd.respond_info, raise_error=gcmd.error)
+                self.tool_missing_helper.activate()
                 self.run_gcode('after_change_gcode',
                                tool.after_change_gcode, extra_context)
 
             perform_restore = tool.perform_restore_move if tool is not None else self.perform_restore_move
             self._restore_state_and_transform(tool, perform_restore_move=perform_restore)
             self.status = STATUS_READY
-            self.tool_missing_helper.activate()
             if tool:
                 gcmd.respond_info('Selected tool %s (%s)' % (str(tool.tool_number), tool.name))
             else:
