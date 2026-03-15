@@ -42,6 +42,7 @@ class Tool:
         self.params = {**self.toolchanger.params, **toolchanger.get_params_dict(config)}
         self.original_params = {}
         self.extruder_name = self._config_get(config, 'extruder', None)
+        self.heater_name = self._config_get(config, 'heater', None)
 
         self.detect_state       = toolchanger.DETECT_UNAVAILABLE
         self.flip_detect_state  = True
@@ -52,9 +53,10 @@ class Tool:
         _detect_pin_name = config.get('detection_pin', None)
         if _detect_pin_name:
             self._register_button(config, _detect_pin_name)
-            
+
         self.extruder_stepper_name = self._config_get(config, 'extruder_stepper', None)
         self.extruder = None
+        self.heater = None
         self.extruder_stepper = None
         self.fan_name = self._config_get(config, 'fan', None)
         self.fan = None
@@ -79,6 +81,11 @@ class Tool:
             self.extruder_name) if self.extruder_name else None
         self.extruder_stepper = self.printer.lookup_object(
             self.extruder_stepper_name) if self.extruder_stepper_name else None
+        if self.heater_name:
+            self.heater = self.printer.lookup_object(self.heater_name)
+        elif self.extruder:
+            self.heater = self.extruder.get_heater()
+            self.heater_name = self.extruder_name
         if self.fan_name:
             self.fan = self.printer.lookup_object(self.fan_name,
                       self.printer.lookup_object("fan_generic " + self.fan_name))
@@ -147,8 +154,10 @@ class Tool:
         s = {**self.params,
             'name': self.name,
             'toolchanger': self.toolchanger.name,
+            'detect_state': self.detect_state,
             'tool_number': self.tool_number,
             'extruder': self.extruder_name,
+            'heater': self.heater_name,
             'extruder_stepper': self.extruder_stepper_name,
             'fan': self.fan_name,
             'active': self.main_toolchanger.get_selected_tool() == self,
