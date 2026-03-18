@@ -67,6 +67,8 @@ class Tool:
         self.perform_restore_move = self._config_getboolean(
             config, 'perform_restore_move', True)
         self.tool_number = config.getint('tool_number', -1, minval=0)
+        if self.tool_number >= 0:
+            self.assign_tool(self.tool_number)
 
         gcode = self.printer.lookup_object('gcode')
         gcode.register_mux_command("ASSIGN_TOOL", "TOOL", self.name,
@@ -89,8 +91,6 @@ class Tool:
         if self.fan_name:
             self.fan = self.printer.lookup_object(self.fan_name,
                       self.printer.lookup_object("fan_generic " + self.fan_name))
-        if self.tool_number >= 0:
-            self.assign_tool(self.tool_number)
         if getattr(self.detect_mcu, "non_critical_disconnected", False):
             self.is_disconnected = True
 
