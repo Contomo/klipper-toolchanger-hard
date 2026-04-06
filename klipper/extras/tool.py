@@ -78,6 +78,9 @@ class Tool:
         self.printer.register_event_handler("klippy:connect",
                                     self._handle_connect)
 
+    def __str__(self):
+        return self.name
+
     def _handle_connect(self):
         self.extruder = self.printer.lookup_object(
             self.extruder_name) if self.extruder_name else None

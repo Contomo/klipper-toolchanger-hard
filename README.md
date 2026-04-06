@@ -19,6 +19,7 @@ Add the [macros.cfg](/macros.cfg) to your printer config.
 
 ## Changelog
 
+* 2026.04.06 - Fix `abort_on_tool_missing` mis-firing if there are waits during tool change.
 * 2026.02.05 - planned obsolescence of tool_probe_endstop
 * 2025.12.26 - **Breaking change** Stop using G-code offsets for tool offsets. Uses a dedicated gcode transform instead. Hopefully making the code more robust.
 * 2025.12.25 - Use Bezier curves for rounded paths.
