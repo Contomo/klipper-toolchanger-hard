@@ -15,6 +15,7 @@
 import math
 import logging
 EPSILON = 1e-9
+EPSILON_POSITION = 0.001
 EPSILON_ANGLE = 0.001
 
 try:
@@ -109,7 +110,7 @@ class RoundedPath:
         self.real_G0 = self.gcode_move.cmd_G1
         self.gcode.register_command("ROUNDED_G0", self.cmd_ROUNDED_G0)
         self.buffer = []
-        self.lastg0 = []
+        self.lastg0 = None
 
         if config.getboolean('replace_g0', False):
             self.gcode.register_command("G0", None)
@@ -119,6 +120,7 @@ class RoundedPath:
 
     def _handle_command_error(self):
         self.buffer = []
+        self.lastg0 = None
 
     def cmd_ROUNDED_G0(self, gcmd):
         d = gcmd.get_float("D", 0.0)
@@ -134,7 +136,7 @@ class RoundedPath:
             self.buffer.append(ControlPoint(x = currentPos[0], y = currentPos[1], z = currentPos[2], d = 0.0, f = 0.0))
         else:
             origin = self.buffer[0].vec
-            if _vdist(currentPos, origin) > EPSILON:
+            if _vdist(currentPos, origin) > EPSILON_POSITION:
                 raise gcmd.error("ROUNDED_G0 - current position changed since previous command, the last ROUNDED_G0 before other moves needs to be with D=0")
             last = self.buffer[-1]
             currentPos = last.vec
@@ -198,7 +200,7 @@ class RoundedPath:
 
         self.buffer = self.buffer[num_segments:]
         # Update where we finished
-        self.buffer[0].vec = self.lastg0
+        self.buffer[0].vec = self.lastg0 # type: ignore
 
     def _deconflict_lin_d(self, num_segments):
         order = [i+1 for i in range(num_segments)]
@@ -329,7 +331,7 @@ class RoundedPath:
 
     def _g0p(self, p: ControlPoint, vec: list):
         # ignore extremely short residual misalignements that may collapse lookahead junction velocity on otherwise smooth paths.
-        if self.lastg0 and _vdist(self.lastg0, vec) <= 0.001:
+        if self.lastg0 is not None and _vdist(self.lastg0, vec) <= 0.001:
             return
         self.G0_params["X"]=vec[0]
         self.G0_params["Y"]=vec[1]
