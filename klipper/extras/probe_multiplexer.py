@@ -1,5 +1,6 @@
 import bisect
 import inspect
+import logging
 from dataclasses import dataclass, fields
 from typing import Dict, List, Optional, Tuple
 
@@ -12,6 +13,197 @@ except ImportError:
 class Sentinel:
     pass
 
+
+logger = logging.getLogger(__name__)
+
+
+class _CartographerConfigProxy:
+    """Alias the active probe_multiplexer section to Cartographer's expected base name."""
+
+    _EMBEDDED_NAME = "cartographer"
+
+    def __init__(self, config):
+        self._config = config
+
+    def get_name(self):
+        return self._EMBEDDED_NAME
+
+    def has_section(self, section):
+        if section == "stepper_z":
+            # Embedded mode intentionally bypasses Cartographer's stepper_z retract check.
+            return False
+        if section == self._EMBEDDED_NAME:
+            return True
+        return self._config.has_section(section)
+
+    def getsection(self, section):
+        if section == self._EMBEDDED_NAME:
+            return self
+        return self._config.getsection(section)
+
+    def get_prefix_sections(self, prefix):
+        return self._config.get_prefix_sections(prefix)
+
+    def __getattr__(self, name):
+        return getattr(self._config, name)
+
+
+class _CartographerProbeBackend:
+    def __init__(self, printer, klipper_endstop_cls, klipper_homing_state_cls, mcu, scan_mode):
+        self.printer = printer
+        self._klipper_homing_state_cls = klipper_homing_state_cls
+        self.scan_mode = scan_mode
+        self._endstop = klipper_endstop_cls(mcu, scan_mode)
+
+        # Keep the same interface shape used by ProbeEndstopWrapper.
+        self.get_mcu = self._endstop.get_mcu
+        self.add_stepper = self._endstop.add_stepper
+        self.get_steppers = self._endstop.get_steppers
+        self.home_start = self._endstop.home_start
+        self.home_wait = self._endstop.home_wait
+        self.query_endstop = self._endstop.query_endstop
+
+    def multi_probe_begin(self, *args, **kwargs):
+        del args, kwargs
+        return
+
+    def multi_probe_end(self):
+        return
+
+    def probe_prepare(self, *args, **kwargs):
+        del args, kwargs
+        return
+
+    def probe_finish(self, *args, **kwargs):
+        del args, kwargs
+        return
+
+    def probing_move(self, pos, speed, gcmd=None):
+        del gcmd
+        phoming = self.printer.lookup_object("homing")
+        return phoming.probing_move(self, pos, speed)
+
+    def get_position_endstop(self):
+        return self._endstop.get_position_endstop()
+
+    def on_home_end(self, homing):
+        self.scan_mode.on_home_end(self._klipper_homing_state_cls(homing))
+
+
+class _EmbeddedCartographerManager:
+    _instances: Dict[int, "_EmbeddedCartographerManager"] = {}
+
+    @classmethod
+    def for_printer(cls, printer):
+        key = id(printer)
+        manager = cls._instances.get(key)
+        if manager is None:
+            manager = cls(printer)
+            cls._instances[key] = manager
+        return manager
+
+    def __init__(self, printer):
+        self.printer = printer
+        self._initialized = False
+        self._source_section: Optional[str] = None
+        self._klipper_endstop_cls = None
+        self._klipper_homing_state_cls = None
+        self._cartographer = None
+        self._adapters = None
+
+    def _import_cartographer(self, config):
+        try:
+            from cartographer.adapters.klipper.endstop import (  # type: ignore
+                KlipperEndstop,
+                KlipperHomingState,
+            )
+            from cartographer.core import PrinterCartographer  # type: ignore
+            from cartographer.runtime.loader import (  # type: ignore
+                init_adapter,
+                init_integrator,
+            )
+        except Exception as e:
+            raise config.error(
+                "Unable to import Cartographer modules for embedded probe_multiplexer mode: %s"
+                % (e,)
+            )
+        return (
+            KlipperEndstop,
+            KlipperHomingState,
+            PrinterCartographer,
+            init_adapter,
+            init_integrator,
+        )
+
+    def _register_filtered_macros(self, config, integrator, cartographer) -> int:
+        count = 0
+        for registration in getattr(cartographer, "macros", []):
+            name = getattr(registration, "name", None)
+            if not isinstance(name, str):
+                continue
+            if not name.startswith("CARTOGRAPHER_"):
+                continue
+            try:
+                integrator.register_macro(registration)
+            except Exception as e:
+                raise config.error(
+                    "Failed to register embedded Cartographer macro '%s': %s"
+                    % (name, e)
+                )
+            count += 1
+        return count
+
+    def ensure_initialized(self, config):
+        if self._initialized:
+            raise config.error(
+                "Only one [probe_multiplexer cartographer ...] entry is supported; "
+                "already initialized from '%s'."
+                % (self._source_section,)
+            )
+
+        (
+            klipper_endstop_cls,
+            klipper_homing_state_cls,
+            printer_cartographer_cls,
+            init_adapter,
+            init_integrator,
+        ) = self._import_cartographer(config)
+
+        proxy_config = _CartographerConfigProxy(config)
+        adapters = init_adapter(proxy_config)
+        integrator = init_integrator(adapters)
+        integrator.setup()
+
+        cartographer = printer_cartographer_cls(adapters)
+        registered_macros = self._register_filtered_macros(
+            config, integrator, cartographer
+        )
+        integrator.register_coil_temperature_sensor()
+        integrator.register_ready_callback(cartographer.ready_callback)
+
+        self._klipper_endstop_cls = klipper_endstop_cls
+        self._klipper_homing_state_cls = klipper_homing_state_cls
+        self._cartographer = cartographer
+        self._adapters = adapters
+        self._source_section = config.get_name()
+        self._initialized = True
+
+        logger.info(
+            "probe_multiplexer: embedded Cartographer initialized from %s "
+            "(macro filter: CARTOGRAPHER_*, registered=%d)",
+            self._source_section,
+            registered_macros,
+        )
+
+    def build_probe_backend(self, config):
+        self.ensure_initialized(config)
+        return _CartographerProbeBackend(
+            self.printer,
+            self._klipper_endstop_cls,
+            self._klipper_homing_state_cls,
+            self._adapters.mcu, # type: ignore
+            self._cartographer.scan_mode, # type: ignore
+        )
 
 def _probe_accepts_mcu_probe() -> bool:
     """Kalico-style probe.PrinterProbe(config, mcu_probe) vs klipper probe.PrinterProbe(config)."""
@@ -231,17 +423,22 @@ class _FrontEndUpstream(_FrontEndBase):
 
 class MuxProbe:
     """One physical probe definition under [probe_multiplexer <name>]."""
-    def __init__(self, config, muxer):
+    def __init__(self, config, muxer, backend_type="probe"):
         self.printer = config.get_printer()
         self.muxer = muxer
         self.name: str = config.get_name()
+        self.backend_type = backend_type
         self.number: Optional[int] = config.getint("probe_number", None, minval=0)
-
-        self.mcu_probe = probe.ProbeEndstopWrapper(config)
-
-        self.x_offset: float = config.getfloat("x_offset", 0.0)
-        self.y_offset: float = config.getfloat("y_offset", 0.0)
-        self.z_offset: float = config.getfloat("z_offset")
+        if self.backend_type == "cartographer":
+            self.mcu_probe = muxer.build_cartographer_probe(config)
+            self.x_offset = config.getfloat("x_offset")
+            self.y_offset = config.getfloat("y_offset")
+            self.z_offset = config.getfloat("z_offset", 0.0)
+        else:
+            self.mcu_probe = probe.ProbeEndstopWrapper(config)
+            self.x_offset = config.getfloat("x_offset", 0.0)
+            self.y_offset = config.getfloat("y_offset", 0.0)
+            self.z_offset = config.getfloat("z_offset")
 
         self.tuning = muxer.frontend.parse_tuning(config)
 
@@ -273,6 +470,7 @@ class MuxProbe:
         return {
             "name": self.name,
             "number": self.number if self.number is not None else -1,
+            "backend": self.backend_type,
             "x_offset": self.x_offset,
             "y_offset": self.y_offset,
             "z_offset": self.z_offset,
@@ -310,6 +508,9 @@ class ProbeMultiplexer:
         self.frontend.set_name(self.name)
 
         self.printer.register_event_handler("klippy:connect", self._handle_connect)
+        self.printer.register_event_handler(
+            "homing:home_rails_end", self._handle_home_rails_end
+        )
 
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -341,6 +542,24 @@ class ProbeMultiplexer:
 
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object("toolhead")
+
+    def _handle_home_rails_end(self, homing_state, rails):
+        probe = self.active_probe
+        if probe is None:
+            return
+        mcu_probe = probe.mcu_probe
+        on_home_end = getattr(mcu_probe, "on_home_end", None)
+        if on_home_end is None:
+            return
+
+        endstops = [es for rail in rails for es, _name in rail.get_endstops()]
+        if self.mcu_probe not in endstops:
+            return
+        on_home_end(homing_state)
+
+    def build_cartographer_probe(self, config):
+        manager = _EmbeddedCartographerManager.for_printer(self.printer)
+        return manager.build_probe_backend(config)
 
 
     def add_probe(self, mux_probe: MuxProbe):
@@ -388,7 +607,7 @@ class ProbeMultiplexer:
     def _get_probe_from_gcmd(self, gcmd, default=Sentinel) -> Optional[MuxProbe]:
         if default is Sentinel:
             default = self.active_probe
-        number = gcmd.get_int("N", gcmd.get_int("NUMBER", None, minval=0), minval=0)
+        number = gcmd.get_int("N", gcmd.get_int("NUMBER", None, minval=-1), minval=-1)
         name = gcmd.get("P", gcmd.get("PROBE", None))
 
         if number is not None and name is not None:
@@ -460,12 +679,14 @@ class ProbeMultiplexer:
 
     def get_status(self, eventtime):
         active_number = self.active_probe.number if self.active_probe else -1
+        active_backend = self.active_probe.backend_type if self.active_probe else None
         active_x = self.active_probe.x_offset if self.active_probe else None
         active_y = self.active_probe.y_offset if self.active_probe else None
         active_z = self.active_probe.z_offset if self.active_probe else None
         status = {
             "probe": self.active_name,
             "probe_number": active_number,
+            "probe_backend": active_backend,
             "x_offset": active_x,
             "y_offset": active_y,
             "z_offset": active_z,
@@ -535,7 +756,7 @@ class EndstopRouter:
 
     def query_endstop(self, print_time):
         self._require_probe_or_fail()
-        return self.active_mcu.query_endstop(print_time)
+        return self.active_mcu.query_endstop(print_time)  # type: ignore
 
 
     def probing_move(self, pos, speed, gcmd=None):
@@ -581,4 +802,16 @@ def load_config(config):
 
 def load_config_prefix(config):
     mux = config.get_printer().load_object(config, "probe_multiplexer")
-    return MuxProbe(config, mux)
+    section = config.get_name()
+    parts = section.split()
+    backend_type = "probe"
+    if len(parts) >= 3:
+        candidate = parts[1].strip().lower()
+        if candidate not in ("probe", "cartographer"):
+            raise config.error(
+                "Unknown [probe_multiplexer] type '%s' in section '%s' "
+                "(supported: probe, cartographer)"
+                % (candidate, section)
+            )
+        backend_type = candidate
+    return MuxProbe(config, mux, backend_type=backend_type)

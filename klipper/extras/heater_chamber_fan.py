@@ -1,9 +1,9 @@
 import logging
-
+# TODO: do properly for kalico too
 from . import fan
-from .heaters import ControlPID, ControlBangBang
+from . import ControlPID, ControlBangBang
 
-PIN_MIN_TIME = getattr(fan, 'FAN_MIN_TIME', 0.100)
+PIN_MIN_TIME = getattr(fan, 'FAN_MIN_TIME', 0.100) # seems to not be consistently present across forks?
 
 
 class _FanConfigProxy:
@@ -113,7 +113,7 @@ class PrinterHeaterChamberFan:
         self.linger_power = self.coast_power_default
 
         # Optional gating
-        self.gate_against = config.get('gate_against', default='heater_bed', note_valid=False)
+        self.gate_against = config.get('gate_against', default='heater_bed') # possibly on `if config.has_section('heater_bed') else None` ?
         self.gate_mode = config.getchoice('gate_mode', {'target': 'target', 'current': 'current', 'either': 'either', None: None}, default='target')
 
         # Control loop wiring
