@@ -8,8 +8,51 @@ import logging
 
 from . import toolchanger
 
-class Tool:
+from typing import Optional
 
+class ToolFilamentTracker:
+    """Tracks filament usage for a specific tools extruder"""
+
+    def __init__(self, tool: 'Tool') -> None:
+        self.tool = tool
+        self._filament_used: float = 0.0
+        self._last_e_pos: Optional[float] = None
+        self.tool.printer.register_event_handler(
+            "extruder:activate_extruder",
+            self._update_filament_used,
+        )
+
+    def _get_cur_e_pos(self) -> Optional[float]:
+        extruder = self.tool.extruder
+        if extruder is None:
+            return None
+        last = extruder.last_position
+        if isinstance(last, (int, float)):
+            return float(last)
+        
+        if isinstance(last, (list, tuple)): # KALICO!?
+            return sum(last)
+
+    def _update_filament_used(self) -> None:
+        e_pos = self._get_cur_e_pos()
+        if e_pos is None:
+            self._last_e_pos = None
+            return
+
+        last_e_pos, self._last_e_pos = self._last_e_pos, e_pos
+
+        if last_e_pos is not None:
+            self._filament_used += e_pos - last_e_pos
+
+    def get_filament_used(self) -> float:
+        self._update_filament_used()
+        return self._filament_used
+
+    def reset_filament_used(self) -> None:
+        self._filament_used = 0.0
+        self._last_e_pos = self._get_cur_e_pos()
+
+class Tool:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.params = config.get_prefix_options('params_')
@@ -41,8 +84,9 @@ class Tool:
             config, 'gcode_z_offset', 0.0)
         self.params = {**self.toolchanger.params, **toolchanger.get_params_dict(config)}
         self.original_params = {}
-        self.extruder_name = self._config_get(config, 'extruder', None)
-        self.heater_name = self._config_get(config, 'heater', None)
+        self.extruder_name      = self._config_get(config, 'extruder', None)
+        self.heater_name        = self._config_get(config, 'heater', None)
+        self.filament_tracker   = ToolFilamentTracker(self) if self.extruder_name else None
 
         self.detect_state       = toolchanger.DETECT_UNAVAILABLE
         self.flip_detect_state  = True
@@ -171,6 +215,7 @@ class Tool:
             'gcode_x_offset': self.gcode_x_offset or 0.0,
             'gcode_y_offset': self.gcode_y_offset or 0.0,
             'gcode_z_offset': self.gcode_z_offset or 0.0,
+            'filament_used': self.filament_tracker.get_filament_used() if self.filament_tracker is not None else 0.0,
         }
         if self.detect_mcu and hasattr(self.detect_mcu, "get_non_critical_disconnect_event_name"):
             s['is_disconnected'] = self.is_disconnected
@@ -222,7 +267,7 @@ class Tool:
                     "SYNC_EXTRUDER_MOTION EXTRUDER='%s' MOTION_QUEUE='%s'" % (self.extruder_stepper_name, hotend_extruder, ))
         if self.fan:
             self.toolchanger.fan_switcher.activate_fan(self.fan)
-            
+
     def deactivate(self):
         if self.extruder_stepper:
             toolhead = self.printer.lookup_object('toolhead')
@@ -233,10 +278,10 @@ class Tool:
 
     def _config_get(self, config, name, default_value):
         return config.get(name, self.toolchanger.config.get(name, default_value))
-    
+
     def _config_getfloat(self, config, name, default_value):
         return config.getfloat(name, self.toolchanger.config.getfloat(name, default_value))
-    
+
     def _config_getboolean(self, config, name, default_value):
         return config.getboolean(name, self.toolchanger.config.getboolean(name, default_value))
 

@@ -345,6 +345,9 @@ class Toolchanger:
                                     self.cmd_SAVE_TOOL_PARAMETER)
         self.gcode.register_command("VERIFY_TOOL_DETECTED",
                                     self.cmd_VERIFY_TOOL_DETECTED)
+        self.gcode.register_command("RESET_TOOL_FILAMENT",
+                                    self.cmd_RESET_TOOL_FILAMENT,
+                                    desc=self.cmd_RESET_TOOL_FILAMENT_help)
         self.fan_switcher = None
         self.validate_tool_timer = None
 
@@ -431,8 +434,7 @@ class Toolchanger:
             #TODO dont raise config error at runtime!
             raise self.config.error('on_tool_mounted_gcode or on_tool_removed_gcode require tool detection')
         
-    cmd_INITIALIZE_TOOLCHANGER_help = "Initialize the toolchanger"
-
+    cmd_INITIALIZE_TOOLCHANGER_help = "Initialize the toolchanger [TOOL=<name>|T=<number>] (default=detected tool)"
     def cmd_INITIALIZE_TOOLCHANGER(self, gcmd):
         tool = self.gcmd_tool(gcmd, self.detected_tool)  # type: ignore
         was_error  = self.status == STATUS_ERROR
@@ -442,14 +444,26 @@ class Toolchanger:
                 raise gcmd.error("Cannot recover, no tool")
             self._recover_position(gcmd, tool)
 
-    cmd_SELECT_TOOL_help = 'Select active tool'
+    cmd_SELECT_TOOL_help = 'Select active tool [TOOL=<name>|T=<number>]'
     def cmd_SELECT_TOOL(self, gcmd):
         tool = self.gcmd_tool(gcmd)
         restore_axis = gcmd.get('RESTORE_AXIS', tool.t_command_restore_axis)  # type: ignore
         self.select_tool(gcmd, tool, restore_axis)
 
-    cmd_SET_TOOL_TEMPERATURE_help = 'Set temperature for tool'
+    cmd_RESET_TOOL_FILAMENT_help = 'Reset filament usage counter [TOOL=<name>|T=<number>] (default=active tool)'
+    def cmd_RESET_TOOL_FILAMENT(self, gcmd):
+        tool = self.gcmd_tool(gcmd, default=self.active_tool) # type: ignore
+        if tool is None:
+            raise gcmd.error("RESET_TOOL_FILAMENT: no tool specified and no active tool")
 
+        tracker = tool.filament_tracker # type: ignore
+        if tracker is None:
+            raise gcmd.error("RESET_TOOL_FILAMENT: tool %s has no filament tracker" % (tool.name,)) # type: ignore
+
+        tracker.reset_filament_used()
+        gcmd.respond_info('%s filament counter reset' % (tool.name,)) # type: ignore
+
+    cmd_SET_TOOL_TEMPERATURE_help = 'Set temperature for tool'
     def cmd_SET_TOOL_TEMPERATURE(self, gcmd):
         temp = gcmd.get_float('TARGET', 0.)
         wait = gcmd.get_int('WAIT', 0) == 1
@@ -986,7 +1000,8 @@ class Toolchanger:
             **extra_context,
         }
         template.run_gcode_from_command(context)
-        
+
+
     def cmd_SET_TOOL_OFFSET(self, gcmd):
         tool = self._get_tool_from_gcmd(gcmd)
         _x = gcmd.get_float("X", None)
@@ -1033,6 +1048,7 @@ class Toolchanger:
             raise gcmd.error('Tool does not have parameter %s' % (name))
         configfile = self.printer.lookup_object('configfile')
         configfile.set(tool.name, name, tool.params[name])
+
 
     def ensure_homed(self, gcmd):
         if not self.uses_axis:

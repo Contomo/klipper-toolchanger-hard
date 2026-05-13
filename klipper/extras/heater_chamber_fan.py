@@ -1,7 +1,7 @@
 import logging
 # TODO: do properly for kalico too
 from . import fan
-from . import ControlPID, ControlBangBang
+from .heaters import ControlPID, ControlBangBang
 
 PIN_MIN_TIME = getattr(fan, 'FAN_MIN_TIME', 0.100) # seems to not be consistently present across forks?
 
