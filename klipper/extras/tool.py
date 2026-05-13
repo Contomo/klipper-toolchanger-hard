@@ -94,6 +94,10 @@ class Tool:
         if self.fan_name:
             self.fan = self.printer.lookup_object(self.fan_name,
                       self.printer.lookup_object("fan_generic " + self.fan_name))
+        # Register T commands for initial tool assignments after config parsing
+        # finishes, so user-defined Tn macros are not shadowed mid-parse.
+        if self.tool_number >= 0:
+            self.register_t_gcode(self.tool_number)
         if getattr(self.detect_mcu, "non_critical_disconnected", False):
             self.is_disconnected = True
 
@@ -183,7 +187,10 @@ class Tool:
         prev_number = self.tool_number
         self.tool_number = number
         self.main_toolchanger.assign_tool(self, number, prev_number, replace)
-        self.register_t_gcode(number)
+        # Runtime reassignment should update Tn mapping immediately.
+        # Initial registration is delayed to _handle_connect.
+        if replace:
+            self.register_t_gcode(number)
 
     def register_t_gcode(self, number):
         gcode = self.printer.lookup_object('gcode')
@@ -215,6 +222,7 @@ class Tool:
                     "SYNC_EXTRUDER_MOTION EXTRUDER='%s' MOTION_QUEUE='%s'" % (self.extruder_stepper_name, hotend_extruder, ))
         if self.fan:
             self.toolchanger.fan_switcher.activate_fan(self.fan)
+            
     def deactivate(self):
         if self.extruder_stepper:
             toolhead = self.printer.lookup_object('toolhead')
@@ -225,8 +233,10 @@ class Tool:
 
     def _config_get(self, config, name, default_value):
         return config.get(name, self.toolchanger.config.get(name, default_value))
+    
     def _config_getfloat(self, config, name, default_value):
         return config.getfloat(name, self.toolchanger.config.getfloat(name, default_value))
+    
     def _config_getboolean(self, config, name, default_value):
         return config.getboolean(name, self.toolchanger.config.getboolean(name, default_value))
 
