@@ -88,8 +88,8 @@ Set up your files like so:
 │   ├── calibrate-offsets.cfg
 │   ├── crash-detection.cfg
 │   └── toolchanger-include.cfg
-|   ├── macro_templates
-|   |   ├── variable_helpers.cfg
+|   ├── macro_templates/              #NEW MACRO_TEMPLATES FOLDER 
+|   |   ├── variable_helpers.cfg      #.cfg in macro_templates is from contomo's config linked above!
 |   |   ├── toolchanger_helpers.cfg
 |   |   ├── html_helpers.cfg
 |   |   ├── homing_helpers.cfg
