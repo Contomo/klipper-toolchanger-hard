@@ -73,6 +73,11 @@ from /user-configs, ONLY download toolchanger-include.cfg for TAP setups. toolch
 https://github.com/jwellman80/klipper-toolchanger-easy/tree/main/examples/easy-additions/user-configs
 ```
 
+Also, download and add everything from the macro_templates folder to the toolchanger folder (as shown in file structure shown below).
+```commandline
+https://github.com/Contomo/VoronTC-backupConfgis/tree/78b2b6d248bf0bac581ea97d1b3456e1cb7e0d58/printer_data/config/toolchanger/MultiToolManagement/macro_templates
+```
+
 Set up your files like so:
 ```commandline
 ├── toolchanger/
@@ -83,6 +88,13 @@ Set up your files like so:
 │   ├── calibrate-offsets.cfg
 │   ├── crash-detection.cfg
 │   └── toolchanger-include.cfg
+|   ├── macro_templates/              #NEW MACRO_TEMPLATES FOLDER 
+|   |   ├── variable_helpers.cfg      #.cfg in macro_templates is from contomo's config linked above!
+|   |   ├── toolchanger_helpers.cfg
+|   |   ├── html_helpers.cfg
+|   |   ├── homing_helpers.cfg
+|   |   ├── global_helpers.cfg
+|   |   ├── auto_registration_for_helpers.cfg
 ├── tools/                   	 # Tool-specific configurations
 │   ├── T0.cfg          			 # More tools as needed
 │   └── T1.cfg
@@ -104,12 +116,26 @@ Edit your include in printer.cfg:
 FROM: 
 ```commandline
 [include toolchanger/readonly-configs/toolchanger-include.cfg]
+
 ```
-TO:   
+TO: (Also included macro_templates folder)   
 ```commandline
 [include toolchanger/toolchanger-include.cfg]
+[include macro_templates/*.cfg]
 ```
 
 In tool_detection.cfg, comment out the macros INITIALIZE_TOOLCHANGER, _INITIALIZE_FROM_DETECTED_TOOL, _INITIALIZE_FROM_DETECTED_TOOL_IMPL, VERIFY_TOOL_DETECTED.  
+If you see the error "Cannot have both [probe] and [probe_multiplexer].", you should recheck the above is uncommented. 
+
+Grab the latest toolchanger.cfg from Contomo's backup: (replace the whole file)
+```commandline
+https://github.com/Contomo/VoronTC-backupConfgis/blob/78b2b6d248bf0bac581ea97d1b3456e1cb7e0d58/printer_data/config/toolchanger/MultiToolManagement/toolchanger.cfg
+```
+
+ALSO VERY IMPORTANT: Copy paste the entire macro **[gcode_macro _toolchanger_settings]** from the link below, to your printer.cfg.
+```commandline
+https://github.com/Contomo/VoronTC-backupConfgis/blob/78b2b6d248bf0bac581ea97d1b3456e1cb7e0d58/printer_data/config/printer.cfg
+```
+
 
 All done! :)
