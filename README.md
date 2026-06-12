@@ -19,7 +19,7 @@ Add the [macros.cfg](/macros.cfg) to your printer config.
 
 **if you are already using another klipper toolchanger and want to use the other extras this repo contains without paving over the other toolchanger**
 ```commandline
-wget -O - https://raw.githubusercontent.com/Contomo/klipper-toolchanger-hard/main/install-only-secondary.sh.sh | bash
+wget -O - https://raw.githubusercontent.com/Contomo/klipper-toolchanger-hard/main/install-only-secondary.sh | bash
 ```
 
 ## Changelog
