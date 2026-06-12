@@ -17,6 +17,11 @@ wget -O - https://raw.githubusercontent.com/Contomo/klipper-toolchanger-hard/mai
 ```
 Add the [macros.cfg](/macros.cfg) to your printer config.
 
+**if you are already using another klipper toolchanger and want to use the other extras this repo contains without paving over the other toolchanger**
+```commandline
+wget -O - https://raw.githubusercontent.com/Contomo/klipper-toolchanger-hard/main/install-only-secondary.sh.sh | bash
+```
+
 ## Changelog
 
 * 2026.04.06 - Fix `abort_on_tool_missing` mis-firing if there are waits during tool change.
